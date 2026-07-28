@@ -17,10 +17,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
+from ..fs import FileSystem, filesystem_for, join
 from ..grains import Grain, truncate
+from ..ids import dataset_uri
 from ..types import (
     ANY,
     UNPARTITIONED,
@@ -81,6 +82,7 @@ class IcebergCatalog:
     """Datasets are Iceberg table roots containing a `metadata/` directory."""
 
     name: str = "iceberg"
+    storage_options: dict[str, Any] = field(default_factory=dict)
     overrides: dict[DatasetId, PartitionSpec] = field(default_factory=dict)
     capabilities: Capabilities = Capabilities(
         lineage=LineageSource.DECLARED,
@@ -95,29 +97,36 @@ class IcebergCatalog:
 
     # -- table access ----------------------------------------------------------
 
-    def _root(self, dataset: DatasetId) -> Path:
-        if dataset.namespace != "file":
-            raise ValueError(f"{self.name} adapter reads local paths, not {dataset.namespace}")
-        return Path(dataset.name)
+    def _root(self, dataset: DatasetId) -> str:
+        return dataset_uri(dataset).rstrip("/")
 
-    def _metadata_file(self, dataset: DatasetId) -> Path | None:
+    def _fs(self, dataset: DatasetId) -> FileSystem:
+        return filesystem_for(self._root(dataset), **self.storage_options)
+
+    def _metadata_file(self, dataset: DatasetId) -> str | None:
         """The current metadata file: version-hint if present, else highest version."""
-        directory = self._root(dataset) / "metadata"
-        if not directory.is_dir():
+        fs = self._fs(dataset)
+        directory = join(self._root(dataset), "metadata")
+        if not fs.is_dir(directory):
             return None
-        hint = directory / "version-hint.text"
-        if hint.is_file():
-            version = hint.read_text().strip()
+
+        hint = join(directory, "version-hint.text")
+        if fs.exists(hint):
+            version = fs.read_text(hint).strip()
             for candidate in (f"v{version}.metadata.json", f"{version}.metadata.json"):
-                if (directory / candidate).is_file():
-                    return directory / candidate
-        files = sorted(directory.glob("*.metadata.json"), key=lambda p: (p.stat().st_mtime, p.name))
-        return files[-1] if files else None
+                target = join(directory, candidate)
+                if fs.exists(target):
+                    return target
+
+        # No hint: the highest-numbered metadata file wins. Sorting by modification
+        # time would pick the wrong one when a table is copied between locations.
+        found = [i for i in fs.ls(directory, recursive=False) if i.path.endswith(".metadata.json")]
+        return max(found, key=lambda i: i.path).path if found else None
 
     def is_iceberg_table(self, dataset: DatasetId) -> bool:
         try:
             return self._metadata_file(dataset) is not None
-        except ValueError:
+        except (ValueError, OSError):
             return False
 
     def _table(self, dataset: DatasetId) -> Any:
@@ -125,7 +134,7 @@ class IcebergCatalog:
         path = self._metadata_file(dataset)
         if path is None:
             raise FileNotFoundError(f"no Iceberg metadata found under {self._root(dataset)}")
-        return static_table.from_metadata(str(path))
+        return static_table.from_metadata(str(path), properties=dict(self.storage_options))
 
     # -- partition spec --------------------------------------------------------
 

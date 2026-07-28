@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -268,3 +268,8 @@ class Capabilities:
     erasure: ErasureMode = ErasureMode.NONE
     column_lineage: bool = False
     partition_aware: bool = False
+    # How stale this source's metadata can be. Snowflake's ACCOUNT_USAGE views lag by
+    # up to three hours; Databricks system tables by about two. Advancing a resume
+    # token past the lag permanently skips rows that had not landed yet, so adapters
+    # state it here rather than leaving it to be discovered in production.
+    freshness_lag: timedelta | None = None

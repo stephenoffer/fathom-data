@@ -17,7 +17,7 @@ from "the whole dataset", so callers treat refinement as unbounded instead.
 from __future__ import annotations
 
 import calendar
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import IntEnum
 from math import ceil
 
@@ -58,7 +58,20 @@ _MIN_FINE_PER_COARSE: dict[tuple[Grain, Grain], int] = {
 
 
 def truncate(dt: datetime, grain: Grain) -> datetime:
-    """Round `dt` down to the start of its enclosing `grain` bucket."""
+    """Round `dt` down to the start of its enclosing `grain` bucket, in naive UTC.
+
+    Partition keys are always naive UTC, and this is the single place that is
+    enforced, because every source of a time partition value funnels through here.
+
+    The reason is that `datetime(2026, 3, 14)` and
+    `datetime(2026, 3, 14, tzinfo=UTC)` are unequal, hash differently, and print
+    identically. Warehouse drivers hand back aware datetimes; Parquet paths and
+    Delta partition values produce naive ones. Without normalizing, a plan seeded
+    from Snowflake would never match a partition profiled from files, and the
+    symptom would be a planner that quietly rebuilds nothing.
+    """
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(UTC).replace(tzinfo=None)
     if grain is Grain.HOUR:
         return dt.replace(minute=0, second=0, microsecond=0)
     if grain is Grain.DAY:
@@ -82,7 +95,12 @@ def step(dt: datetime, n: int, grain: Grain) -> datetime:
         # Clamp the day so stepping off the end of a short month stays valid.
         day = min(dt.day, calendar.monthrange(year, month + 1)[1])
         return dt.replace(year=year, month=month + 1, day=day)
-    return dt.replace(year=dt.year + n, day=min(dt.day, 29) if dt.month == 2 else dt.day)
+    # Clamp against the target year's own month length: 29 February plus one year
+    # is 28 February, and a hard-coded 29 would raise.
+    target_year = dt.year + n
+    return dt.replace(
+        year=target_year, day=min(dt.day, calendar.monthrange(target_year, dt.month)[1])
+    )
 
 
 def span(start: datetime, end: datetime, grain: Grain) -> list[datetime]:

@@ -127,8 +127,12 @@ def profile_parquet(
     *,
     dataset: DatasetId,
     partition: KeyPredicate | None = None,
+    fs: Any = None,
 ) -> Profile:
     """Build a profile from Parquet footers alone. No data pages are read.
+
+    Pass `fs` to profile object storage; without it, paths are opened directly from
+    the local filesystem.
 
     Statistics are optional in the Parquet spec, so a column whose writer omitted
     them yields `None` rather than a fabricated value. Callers decide whether that
@@ -141,7 +145,11 @@ def profile_parquet(
     files = 0
 
     for path in paths:
-        md = pq.ParquetFile(str(path)).metadata
+        if fs is not None:
+            with fs.open(str(path)) as handle:
+                md = pq.ParquetFile(handle).metadata
+        else:
+            md = pq.ParquetFile(str(path)).metadata
         files += 1
         total_rows += md.num_rows
         schema = md.schema.to_arrow_schema()

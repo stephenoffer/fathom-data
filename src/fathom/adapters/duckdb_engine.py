@@ -24,9 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from ..grains import step
 from ..types import (
-    ANY,
     UNPARTITIONED,
     Capabilities,
     ChangeSource,
@@ -38,56 +36,10 @@ from ..types import (
     Pushdown,
 )
 from .base import ChangeSet, LineageEvent, QueryEvent, Token, register
+from .predicates import literal as _literal
+from .predicates import render_predicate
 
-__all__ = ["DuckDBEngine", "render_predicate"]
-
-
-def _literal(value: Any) -> str:
-    if isinstance(value, datetime):
-        return f"TIMESTAMP '{value.isoformat(sep=' ')}'"
-    if isinstance(value, bool):
-        return "TRUE" if value else "FALSE"
-    if isinstance(value, (int, float)):
-        return str(value)
-    if value is None:
-        return "NULL"
-    escaped = str(value).replace("'", "''")
-    return f"'{escaped}'"
-
-
-def _key_predicate_sql(spec: PartitionSpec, key: KeyPredicate) -> str:
-    """SQL for one partition key. Unconstrained fields contribute nothing."""
-    clauses: list[str] = []
-    for f in spec.fields:
-        value = key.get(f.name)
-        if value is ANY:
-            continue
-        if value is None:
-            clauses.append(f'"{f.name}" IS NULL')
-            continue
-        if f.kind == "time" and isinstance(value, datetime):
-            assert f.grain is not None
-            upper = step(value, 1, f.grain)
-            # Half-open range rather than equality: the column may carry a full
-            # timestamp even when the partition is a day.
-            clauses.append(f'"{f.name}" >= {_literal(value)} AND "{f.name}" < {_literal(upper)}')
-        else:
-            clauses.append(f'"{f.name}" = {_literal(value)}')
-    return "(" + " AND ".join(clauses) + ")" if clauses else "TRUE"
-
-
-def render_predicate(spec: PartitionSpec, keys: Iterable[KeyPredicate]) -> str:
-    """A WHERE clause covering every key. Returns `TRUE` when anything is unbounded."""
-    parts: list[str] = []
-    for key in sorted(keys, key=str):
-        clause = _key_predicate_sql(spec, key)
-        if clause == "TRUE":
-            return "TRUE"  # one unbounded key subsumes every narrower one
-        if clause not in parts:
-            parts.append(clause)
-    if not parts:
-        return "TRUE"
-    return " OR ".join(parts)
+__all__ = ["DuckDBEngine"]
 
 
 @register("duckdb")

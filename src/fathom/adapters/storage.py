@@ -1,10 +1,14 @@
-"""Local filesystem storage adapter.
+"""Object storage adapter: S3, GCS, ADLS, R2, MinIO, HDFS, and local disk.
 
-The reference implementation of `StorageAdapter`, and the one the conformance suite
-runs against. It uses the weakest change-detection strategy on purpose — LIST plus
-mtime compare — so that anything built on top works for adapters that can offer
-nothing better. Adapters with snapshot diffs or event streams are strictly faster,
-never differently shaped.
+One implementation for every protocol, because the difference between a bucket and a
+directory is fsspec's problem, not the planner's. `LocalStorage` is an alias kept for
+readability in tests and docs.
+
+Change detection here is `LIST_DIFF`, the weakest strategy on the ladder, chosen
+deliberately: if everything downstream works on LIST plus etag comparison, then a
+Delta or Iceberg adapter with real snapshot diffs is strictly faster rather than
+differently shaped. At scale you should not use this — see `inventory.py` for the
+S3 Inventory path, which costs a manifest read instead of a full bucket listing.
 """
 
 from __future__ import annotations
@@ -12,9 +16,11 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from pathlib import Path
+from datetime import datetime
+from typing import Any
 
+from ..fs import FileInfo, FileSystem, data_files, filesystem_for
+from ..ids import dataset_uri
 from ..paths import PathTemplate, key_from_path
 from ..profile import Profile, profile_parquet
 from ..types import (
@@ -30,9 +36,9 @@ from ..types import (
 )
 from .base import ChangeSet, ObjectMeta, Token, register
 
-__all__ = ["LocalStorage"]
+__all__ = ["LocalStorage", "ObjectStorage"]
 
-DATA_SUFFIXES = {".parquet", ".pq"}
+DATA_SUFFIXES = (".parquet", ".pq")
 
 
 def _decode_token(token: Token | None) -> tuple[datetime | None, frozenset[str]]:
@@ -58,14 +64,20 @@ def _encode_token(high_water: datetime | None, boundary: Iterable[str]) -> Token
     )
 
 
-@register("local")
+@register("storage")
 @dataclass
-class LocalStorage:
-    """Datasets are directories; partitions are Hive segments or a declared template."""
+class ObjectStorage:
+    """Datasets are prefixes; partitions come from Hive segments or a declared template.
 
-    name: str = "local"
+    `storage_options` passes straight to fsspec, so credentials, an S3-compatible
+    endpoint, or a requester-pays flag are all expressible without a code change.
+    """
+
+    name: str = "storage"
+    storage_options: dict[str, Any] = field(default_factory=dict)
     specs: dict[DatasetId, PartitionSpec] = field(default_factory=dict)
     templates: dict[DatasetId, PathTemplate] = field(default_factory=dict)
+    suffixes: tuple[str, ...] = DATA_SUFFIXES
     capabilities: Capabilities = Capabilities(
         lineage=LineageSource.DECLARED,
         change=ChangeSource.LIST_DIFF,
@@ -87,47 +99,58 @@ class LocalStorage:
     def describe_partitioning(self, dataset: DatasetId) -> PartitionSpec:
         return self.specs.get(dataset, UNPARTITIONED)
 
-    def _root(self, dataset: DatasetId) -> Path:
-        if dataset.namespace != "file":
-            raise ValueError(f"{self.name} adapter cannot address {dataset.namespace}")
-        return Path(dataset.name)
+    # -- filesystem ------------------------------------------------------------
+
+    def uri(self, dataset: DatasetId) -> str:
+        return dataset_uri(dataset)
+
+    def filesystem(self, dataset: DatasetId) -> FileSystem:
+        return filesystem_for(self.uri(dataset), **self.storage_options)
+
+    def _files(self, dataset: DatasetId) -> list[FileInfo]:
+        fs = self.filesystem(dataset)
+        return data_files(fs, self.uri(dataset), self.suffixes)
+
+    # -- listing ---------------------------------------------------------------
 
     def list_objects(self, dataset: DatasetId) -> Iterable[ObjectMeta]:
-        root = self._root(dataset)
-        if not root.exists():
-            return
-        for path in sorted(root.rglob("*")):
-            if not path.is_file() or path.suffix.lower() not in DATA_SUFFIXES:
-                continue
-            stat = path.stat()
+        fs = self.filesystem(dataset)
+        unstrip = getattr(fs, "unstrip", lambda p: p)
+        for info in self._files(dataset):
             yield ObjectMeta(
-                path=str(path),
-                size=stat.st_size,
-                etag=f"{stat.st_size}-{int(stat.st_mtime_ns)}",
-                modified=datetime.fromtimestamp(stat.st_mtime, tz=UTC),
+                path=unstrip(info.path),
+                size=info.size,
+                etag=info.etag or f"{info.size}-{info.modified}",
+                modified=info.modified,
             )
 
     def key_for(self, dataset: DatasetId, path: str) -> KeyPredicate:
-        root = self._root(dataset)
-        try:
-            relative = str(Path(path).relative_to(root))
-        except ValueError:
-            relative = path
+        """Derive a partition key from an object's path relative to the dataset root."""
+        root = self.uri(dataset).rstrip("/")
+        relative = path
+        for candidate in (root, root.split("://", 1)[-1]):
+            marker = candidate.rstrip("/") + "/"
+            index = path.find(marker)
+            if index >= 0:
+                relative = path[index + len(marker) :]
+                break
         return key_from_path(
             relative,
             self.describe_partitioning(dataset),
             template=self.templates.get(dataset),
         )
 
+    # -- change detection ------------------------------------------------------
+
     def changed(self, dataset: DatasetId, since: Token | None) -> ChangeSet:
         """Objects modified after `since`, and the partitions they belong to.
 
         The token is a high-water modification time *plus* the etags of the objects
-        sitting exactly on that boundary. Filesystem timestamps have coarse
-        resolution, so a strict `>` comparison would miss a file written in the same
-        tick as the last one we saw, while a `>=` comparison would re-report the
-        newest files forever. Carrying the boundary etags gives both properties:
-        nothing is missed, and a quiet dataset converges to reporting nothing.
+        sitting exactly on that boundary. Timestamps are coarse and object stores
+        happily write several objects in the same second, so a strict `>` would miss
+        one while a `>=` would re-report the newest forever. Carrying the boundary
+        etags gives both properties: nothing is missed, and a quiet dataset converges
+        to reporting nothing.
         """
         cutoff, seen = _decode_token(since)
 
@@ -137,6 +160,9 @@ class LocalStorage:
 
         for obj in self.list_objects(dataset):
             if obj.modified is None:
+                # No timestamp at all: we cannot reason incrementally, so treat it as
+                # changed every time rather than silently skipping it.
+                touched.append(obj)
                 continue
             if high_water is None or obj.modified > high_water:
                 high_water = obj.modified
@@ -146,15 +172,16 @@ class LocalStorage:
             if cutoff is None or (obj.modified >= cutoff and obj.etag not in seen):
                 touched.append(obj)
 
-        partitions = frozenset(self.key_for(dataset, o.path) for o in touched)
         return ChangeSet(
-            partitions=partitions,
+            partitions=frozenset(self.key_for(dataset, o.path) for o in touched),
             token=_encode_token(high_water, boundary),
             complete=True,
             objects=tuple(touched),
         )
 
-    def local_paths(self, objects: Sequence[ObjectMeta]) -> list[str | Path]:
+    # -- reads -----------------------------------------------------------------
+
+    def paths(self, objects: Sequence[ObjectMeta]) -> list[str]:
         return [o.path for o in objects]
 
     def profile(
@@ -172,7 +199,22 @@ class LocalStorage:
         if partition is not None and not partition.is_unbounded:
             objects = [o for o in objects if self.key_for(dataset, o.path) == partition]
         return profile_parquet(
-            self.local_paths(objects),
+            self.paths(objects),
             dataset=dataset,
             partition=partition,
+            fs=self.filesystem(dataset),
         )
+
+    def erase_files(self, dataset: DatasetId, paths: Iterable[str]) -> int:
+        """Physically remove objects. Used only by an executed erasure plan."""
+        fs = self.filesystem(dataset)
+        removed = 0
+        for path in paths:
+            fs.delete(path)
+            removed += 1
+        return removed
+
+
+# Local disk is the same adapter with no storage options; the alias keeps call sites
+# readable and preserves the name the conformance suite was written against.
+LocalStorage = ObjectStorage

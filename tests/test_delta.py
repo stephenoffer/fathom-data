@@ -213,8 +213,31 @@ def test_files_for_can_scope_to_one_partition(table, catalog):
     assert "dt=2026-03-15" in files[0]
 
 
-def test_remote_namespaces_are_rejected_clearly(catalog):
+def test_catalog_datasets_are_rejected_clearly(catalog):
+    """A Snowflake table has no path; looking for a `_delta_log` under it is nonsense."""
     from fathom.types import DatasetId
 
-    with pytest.raises(ValueError, match="storage adapter"):
-        catalog.changed(DatasetId("s3://lake", "events"), None)
+    with pytest.raises(ValueError, match="not a location"):
+        catalog.changed(DatasetId("snowflake://acct", "db.schema.t"), None)
+
+
+def test_object_storage_uris_are_accepted(tmp_path, catalog):
+    """Delta on S3 must take the same path as Delta on disk. Verified with memory://."""
+    import fsspec
+
+    from fathom.fs import clear_cache
+    from fathom.types import DatasetId
+
+    clear_cache()
+    mem = fsspec.filesystem("memory")
+    for version, actions in enumerate(
+        [[metadata(["dt", "region"]), add("2026-03-14", "eu")], [add("2026-03-15", "eu")]]
+    ):
+        body = "\n".join(json.dumps(a) for a in actions)
+        mem.pipe_file(f"/lake/events/_delta_log/{version:020d}.json", body.encode())
+
+    dataset = DatasetId("memory://", "lake/events")
+    assert catalog.is_delta_table(dataset)
+    changes = catalog.changed(dataset, None)
+    assert len(changes.partitions) == 2
+    assert changes.token == "1"

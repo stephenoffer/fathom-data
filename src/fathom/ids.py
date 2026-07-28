@@ -19,7 +19,14 @@ from urllib.parse import urlparse
 
 from .types import DatasetId
 
-__all__ = ["AliasRegistry", "normalize", "normalize_path", "normalize_table"]
+__all__ = [
+    "AliasRegistry",
+    "dataset_uri",
+    "is_path_dataset",
+    "normalize",
+    "normalize_path",
+    "normalize_table",
+]
 
 # Protocol spellings that address identical bytes.
 _SCHEME_ALIASES = {
@@ -216,3 +223,26 @@ class AliasRegistry:
 
     def __len__(self) -> int:
         return len(self._canonical)
+
+
+# Namespaces that address bytes rather than a catalog entry.
+_PATH_NAMESPACES = re.compile(r"^(file|s3|gs|abfss|hdfs|r2|memory)(://|$)", re.I)
+
+
+def is_path_dataset(ds: DatasetId) -> bool:
+    """True when this dataset lives in a filesystem or object store."""
+    return bool(_PATH_NAMESPACES.match(ds.namespace))
+
+
+def dataset_uri(ds: DatasetId) -> str:
+    """The URI a filesystem can open.
+
+    Inverse of `normalize_path`. Raises for catalog datasets, because a Snowflake
+    table has no path and silently returning something path-shaped would send an
+    adapter looking for bytes that do not exist.
+    """
+    if not is_path_dataset(ds):
+        raise ValueError(f"{ds} is a catalog dataset, not a location; it has no URI to open")
+    if ds.namespace == "file":
+        return ds.name
+    return f"{ds.namespace}/{ds.name}" if ds.name else ds.namespace

@@ -20,7 +20,6 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from ..types import (
@@ -112,8 +111,8 @@ class StorageAdapter(Protocol):
 
     def changed(self, dataset: DatasetId, since: Token | None) -> ChangeSet: ...
 
-    def local_paths(self, objects: Sequence[ObjectMeta]) -> list[str | Path]:
-        """Paths pyarrow can open. Remote adapters may return fsspec-style URIs."""
+    def paths(self, objects: Sequence[ObjectMeta]) -> list[str]:
+        """URIs a filesystem can open, in the same order as the objects given."""
         ...
 
 

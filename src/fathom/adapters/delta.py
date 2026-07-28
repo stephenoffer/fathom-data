@@ -5,6 +5,9 @@ and everything change detection needs is in the `add` and `remove` actions: a pa
 the partition values, and whether the commit changed data. Checkpoints are Parquet,
 which pyarrow already reads.
 
+Works against any protocol the filesystem layer supports, so a Delta table on S3 or
+ADLS reads exactly like one on local disk.
+
 This is the best change-detection strategy available anywhere — `SNAPSHOT_DIFF`.
 Cost is proportional to commits since the last run, not to the size of the table, so
 a petabyte table with three commits costs three small file reads.
@@ -15,12 +18,14 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
-from pathlib import Path
+from datetime import UTC, datetime
 from typing import Any
 
-from ..grains import Grain
+from ..fs import FileSystem, filesystem_for, join
+from ..grains import Grain, truncate
+from ..ids import dataset_uri
 from ..types import (
+    ANY,
     UNPARTITIONED,
     Capabilities,
     ChangeSource,
@@ -54,6 +59,7 @@ class DeltaCatalog:
     """Datasets are Delta table roots; partitions come from `partitionValues`."""
 
     name: str = "delta"
+    storage_options: dict[str, Any] = field(default_factory=dict)
     overrides: dict[DatasetId, PartitionSpec] = field(default_factory=dict)
     capabilities: Capabilities = Capabilities(
         lineage=LineageSource.DECLARED,
@@ -69,51 +75,45 @@ class DeltaCatalog:
 
     # -- log access ------------------------------------------------------------
 
-    def _root(self, dataset: DatasetId) -> Path:
-        if dataset.namespace != "file":
-            raise ValueError(
-                f"{self.name} adapter reads local paths; {dataset.namespace} needs a "
-                "storage adapter to fetch the log first"
-            )
-        return Path(dataset.name)
+    def _root(self, dataset: DatasetId) -> str:
+        return dataset_uri(dataset).rstrip("/")
 
-    def _log_dir(self, dataset: DatasetId) -> Path:
-        return self._root(dataset) / _LOG_DIR
+    def _fs(self, dataset: DatasetId) -> FileSystem:
+        return filesystem_for(self._root(dataset), **self.storage_options)
+
+    def _log_dir(self, dataset: DatasetId) -> str:
+        return join(self._root(dataset), _LOG_DIR)
 
     def is_delta_table(self, dataset: DatasetId) -> bool:
         try:
-            return self._log_dir(dataset).is_dir()
-        except ValueError:
+            return self._fs(dataset).is_dir(self._log_dir(dataset))
+        except (ValueError, OSError):
             return False
 
-    def _commits(self, dataset: DatasetId) -> list[tuple[int, Path]]:
+    def _log_entries(self, dataset: DatasetId, pattern: re.Pattern[str]) -> list[tuple[int, str]]:
+        fs = self._fs(dataset)
         log = self._log_dir(dataset)
-        if not log.is_dir():
+        if not fs.is_dir(log):
             return []
-        out = []
-        for path in log.iterdir():
-            m = _COMMIT.match(path.name)
-            if m:
-                out.append((int(m.group(1)), path))
+        out: list[tuple[int, str]] = []
+        for info in fs.ls(log, recursive=False):
+            match = pattern.match(info.path.rsplit("/", 1)[-1])
+            if match:
+                out.append((int(match.group(1)), info.path))
         return sorted(out)
 
-    def _checkpoints(self, dataset: DatasetId) -> list[tuple[int, Path]]:
-        log = self._log_dir(dataset)
-        if not log.is_dir():
-            return []
-        out = []
-        for path in log.iterdir():
-            m = _CHECKPOINT.match(path.name)
-            if m:
-                out.append((int(m.group(1)), path))
-        return sorted(out)
+    def _commits(self, dataset: DatasetId) -> list[tuple[int, str]]:
+        return self._log_entries(dataset, _COMMIT)
 
-    def _actions(self, commit: Path) -> list[dict[str, Any]]:
+    def _checkpoints(self, dataset: DatasetId) -> list[tuple[int, str]]:
+        return self._log_entries(dataset, _CHECKPOINT)
+
+    def _actions(self, dataset: DatasetId, commit: str) -> list[dict[str, Any]]:
         actions: list[dict[str, Any]] = []
-        for line in commit.read_text().splitlines():
-            line = line.strip()
-            if line:
-                actions.append(json.loads(line))
+        for line in self._fs(dataset).read_text(commit).splitlines():
+            stripped = line.strip()
+            if stripped:
+                actions.append(json.loads(stripped))
         return actions
 
     def latest_version(self, dataset: DatasetId) -> int | None:
@@ -125,7 +125,7 @@ class DeltaCatalog:
     def _metadata(self, dataset: DatasetId) -> dict[str, Any] | None:
         """The most recent `metaData` action. Schema changes rewrite it."""
         for _version, path in reversed(self._commits(dataset)):
-            for action in reversed(self._actions(path)):
+            for action in reversed(self._actions(dataset, path)):
                 if "metaData" in action:
                     return dict(action["metaData"])
         return None
@@ -166,8 +166,6 @@ class DeltaCatalog:
         return PartitionSpec.of(*fields)
 
     def _key(self, spec: PartitionSpec, values: dict[str, str | None]) -> KeyPredicate:
-        from ..types import ANY
-
         bindings: list[tuple[str, object]] = []
         for f in spec.fields:
             raw = values.get(f.name)
@@ -187,12 +185,7 @@ class DeltaCatalog:
                     break
                 except ValueError:
                     continue
-            if parsed is None:
-                bindings.append((f.name, ANY))
-            else:
-                from ..grains import truncate
-
-                bindings.append((f.name, truncate(parsed, f.grain)))
+            bindings.append((f.name, ANY if parsed is None else truncate(parsed, f.grain)))
         return KeyPredicate(bindings=tuple(bindings))
 
     # -- change detection ------------------------------------------------------
@@ -220,6 +213,7 @@ class DeltaCatalog:
         objects: list[ObjectMeta] = []
         complete = True
         latest = commits[-1][0]
+        root = self._root(dataset)
 
         if start < 0:
             # No baseline. A checkpoint gives the full file list far more cheaply
@@ -227,16 +221,17 @@ class DeltaCatalog:
             checkpoints = self._checkpoints(dataset)
             if checkpoints:
                 version, path = checkpoints[-1]
-                found = self._read_checkpoint(path, spec)
-                partitions |= found[0]
-                objects.extend(found[1])
-                complete = found[2]
-                start = version
+                found_partitions, found_objects, ok = self._read_checkpoint(dataset, path, spec)
+                partitions |= found_partitions
+                objects.extend(found_objects)
+                complete = ok
+                if ok:
+                    start = version
 
         for version, path in commits:
             if version <= start:
                 continue
-            for action in self._actions(path):
+            for action in self._actions(dataset, path):
                 for verb in ("add", "remove"):
                     entry = action.get(verb)
                     if not entry:
@@ -247,10 +242,10 @@ class DeltaCatalog:
                     if verb == "add":
                         objects.append(
                             ObjectMeta(
-                                path=str(self._root(dataset) / entry["path"]),
+                                path=join(root, entry["path"]),
                                 size=int(entry.get("size") or 0),
                                 modified=(
-                                    datetime.fromtimestamp(entry["modificationTime"] / 1000)
+                                    datetime.fromtimestamp(entry["modificationTime"] / 1000, tz=UTC)
                                     if entry.get("modificationTime")
                                     else None
                                 ),
@@ -265,13 +260,15 @@ class DeltaCatalog:
         )
 
     def _read_checkpoint(
-        self, path: Path, spec: PartitionSpec
+        self, dataset: DatasetId, path: str, spec: PartitionSpec
     ) -> tuple[set[KeyPredicate], list[ObjectMeta], bool]:
         """Partitions present as of a checkpoint. Best effort; failure means widen."""
+        root = self._root(dataset)
         try:
             import pyarrow.parquet as pq
 
-            table = pq.read_table(path, columns=["add"])
+            with self._fs(dataset).open(path) as handle:
+                table = pq.read_table(handle, columns=["add"])
         except Exception:  # noqa: BLE001 - checkpoint layouts vary across writers
             return set(), [], False
 
@@ -283,10 +280,7 @@ class DeltaCatalog:
             partitions.add(self._key(spec, entry.get("partitionValues") or {}))
             if entry.get("path"):
                 objects.append(
-                    ObjectMeta(
-                        path=str(path.parent.parent / entry["path"]),
-                        size=int(entry.get("size") or 0),
-                    )
+                    ObjectMeta(path=join(root, entry["path"]), size=int(entry.get("size") or 0))
                 )
         return partitions, objects, True
 
@@ -300,13 +294,13 @@ class DeltaCatalog:
         root = self._root(dataset)
         live: dict[str, KeyPredicate] = {}
         for _version, path in self._commits(dataset):
-            for action in self._actions(path):
+            for action in self._actions(dataset, path):
                 if add := action.get("add"):
                     live[add["path"]] = self._key(spec, add.get("partitionValues") or {})
                 if remove := action.get("remove"):
                     live.pop(remove["path"], None)
         return [
-            str(root / rel)
+            join(root, rel)
             for rel, key in sorted(live.items())
             if partition is None or partition.is_unbounded or key == partition
         ]

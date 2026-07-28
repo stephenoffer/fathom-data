@@ -18,12 +18,18 @@ dependencies = [
     "pyarrow>=15",
     "sqlglot>=25",
     "click>=8.1",
+    "pyyaml>=6",
+    "fsspec>=2024.2",
 ]
 
 [project.optional-dependencies]
 duckdb = ["duckdb>=1.0"]
 # Iceberg manifests are Avro, so unlike Delta this cannot be read without a library.
 iceberg = ["pyiceberg>=0.9", "pyiceberg-core>=0.5"]
+s3 = ["s3fs>=2024.2"]
+gcs = ["gcsfs>=2024.2"]
+azure = ["adlfs>=2024.2"]
+cloud = ["s3fs>=2024.2", "gcsfs>=2024.2", "adlfs>=2024.2"]
 dev = [
     "pytest>=8",
     "hypothesis>=6",
@@ -34,6 +40,8 @@ dev = [
     "pyiceberg-core>=0.5",
     # Only needed to create real Iceberg tables in the test suite.
     "sqlalchemy>=2",
+    "s3fs>=2024.2",
+    "types-PyYAML",
 ]
 
 [project.urls]
@@ -71,5 +79,5 @@ warn_return_any = true
 # sqlglot's AST is dynamically shaped and pyarrow ships no stubs; both are handled
 # defensively at the call sites instead.
 [[tool.mypy.overrides]]
-module = ["pyarrow.*", "sqlglot.*", "duckdb.*", "pyiceberg.*"]
+module = ["pyarrow.*", "sqlglot.*", "duckdb.*", "pyiceberg.*", "fsspec.*"]
 ignore_missing_imports = true
