@@ -22,7 +22,19 @@ dependencies = [
 
 [project.optional-dependencies]
 duckdb = ["duckdb>=1.0"]
-dev = ["pytest>=8", "hypothesis>=6", "ruff>=0.6", "mypy>=1.11", "duckdb>=1.0"]
+# Iceberg manifests are Avro, so unlike Delta this cannot be read without a library.
+iceberg = ["pyiceberg>=0.9", "pyiceberg-core>=0.5"]
+dev = [
+    "pytest>=8",
+    "hypothesis>=6",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "duckdb>=1.0",
+    "pyiceberg>=0.9",
+    "pyiceberg-core>=0.5",
+    # Only needed to create real Iceberg tables in the test suite.
+    "sqlalchemy>=2",
+]
 
 [project.urls]
 Homepage = "https://github.com/stephenoffer/fathom-data"
@@ -59,5 +71,5 @@ warn_return_any = true
 # sqlglot's AST is dynamically shaped and pyarrow ships no stubs; both are handled
 # defensively at the call sites instead.
 [[tool.mypy.overrides]]
-module = ["pyarrow.*", "sqlglot.*"]
+module = ["pyarrow.*", "sqlglot.*", "duckdb.*", "pyiceberg.*"]
 ignore_missing_imports = true

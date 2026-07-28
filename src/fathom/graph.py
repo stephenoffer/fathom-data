@@ -12,7 +12,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 from .partitions import PartitionMapping, apply
-from .types import ANY, UNPARTITIONED, ColumnRef, DatasetId, KeyPredicate, PartitionSpec
+from .types import UNPARTITIONED, ColumnRef, DatasetId, KeyPredicate, PartitionSpec, subsumes
 
 __all__ = ["Edge", "Graph", "InvalidationPlan"]
 
@@ -20,18 +20,6 @@ __all__ = ["Edge", "Graph", "InvalidationPlan"]
 # Self-referencing incremental models create cycles whose windows grow by a constant
 # each pass; without this the worklist would never converge.
 MAX_REVISITS = 8
-
-
-def _subsumes(outer: KeyPredicate, inner: KeyPredicate) -> bool:
-    """True when `outer` covers everything `inner` does."""
-    names = {k for k, _ in outer.bindings} | {k for k, _ in inner.bindings}
-    for n in names:
-        ov, iv = outer.get(n), inner.get(n)
-        if ov is ANY:
-            continue
-        if iv is ANY or ov != iv:
-            return False
-    return True
 
 
 def _absorb(
@@ -44,9 +32,9 @@ def _absorb(
     merged = set(existing)
     changed = False
     for cand in incoming:
-        if any(_subsumes(e, cand) for e in merged):
+        if any(subsumes(e, cand) for e in merged):
             continue
-        merged = {e for e in merged if not _subsumes(cand, e)}
+        merged = {e for e in merged if not subsumes(cand, e)}
         merged.add(cand)
         changed = True
     return frozenset(merged), changed

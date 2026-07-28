@@ -8,6 +8,7 @@ dimension stays representable.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -29,6 +30,8 @@ __all__ = [
     "PartitionSpec",
     "Pushdown",
     "UNPARTITIONED",
+    "covered_by",
+    "subsumes",
 ]
 
 
@@ -70,6 +73,9 @@ class DatasetId:
     name: str
 
     def __str__(self) -> str:
+        # Local paths are already absolute, so the usual separator would double up.
+        if self.namespace == "file":
+            return f"file://{self.name}"
         return f"{self.namespace}/{self.name}"
 
 
@@ -184,6 +190,29 @@ class KeyPredicate:
             else:
                 parts.append(f"{k}={v}")
         return "/".join(parts)
+
+
+def subsumes(outer: KeyPredicate, inner: KeyPredicate) -> bool:
+    """True when `outer` covers everything `inner` does.
+
+    An `ANY` binding in `outer` covers any value; a concrete binding covers only
+    itself. This is the ordering the whole planner is defined against — the dirty
+    set is a set of predicates, and one predicate absorbing another is how the
+    worklist detects that it has stopped growing.
+    """
+    names = {k for k, _ in outer.bindings} | {k for k, _ in inner.bindings}
+    for name in names:
+        outer_value, inner_value = outer.get(name), inner.get(name)
+        if outer_value is ANY:
+            continue
+        if inner_value is ANY or outer_value != inner_value:
+            return False
+    return True
+
+
+def covered_by(candidates: Iterable[KeyPredicate], key: KeyPredicate) -> bool:
+    """True when any candidate predicate subsumes `key`."""
+    return any(subsumes(c, key) for c in candidates)
 
 
 class LineageSource(StrEnum):

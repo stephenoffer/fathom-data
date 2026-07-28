@@ -102,3 +102,12 @@ def test_alias_cycles_are_rejected():
     reg.alias(a, b)
     with pytest.raises(ValueError, match="cycle"):
         reg.alias(b, a)
+
+
+def test_local_paths_render_as_file_uris():
+    """`file` + an absolute name would otherwise print as `file//private/...`."""
+    assert str(normalize_path("/private/tmp/events")) == "file:///private/tmp/events"
+
+
+def test_bucket_datasets_render_with_a_single_separator():
+    assert str(normalize_path("s3://lake/raw/events")) == "s3://lake/raw/events"

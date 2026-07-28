@@ -9,6 +9,7 @@ never differently shaped.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -32,6 +33,29 @@ from .base import ChangeSet, ObjectMeta, Token, register
 __all__ = ["LocalStorage"]
 
 DATA_SUFFIXES = {".parquet", ".pq"}
+
+
+def _decode_token(token: Token | None) -> tuple[datetime | None, frozenset[str]]:
+    """Read a resume token. Unrecognized tokens mean "no baseline", never a crash."""
+    if not token:
+        return None, frozenset()
+    try:
+        blob = json.loads(token)
+        return datetime.fromisoformat(blob["t"]), frozenset(blob.get("seen", ()))
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        pass
+    try:  # tokens written before boundary etags were carried
+        return datetime.fromisoformat(token), frozenset()
+    except ValueError:
+        return None, frozenset()
+
+
+def _encode_token(high_water: datetime | None, boundary: Iterable[str]) -> Token:
+    if high_water is None:
+        return ""
+    return json.dumps(
+        {"t": high_water.isoformat(), "seen": sorted(boundary)}, separators=(",", ":")
+    )
 
 
 @register("local")
@@ -98,31 +122,34 @@ class LocalStorage:
     def changed(self, dataset: DatasetId, since: Token | None) -> ChangeSet:
         """Objects modified after `since`, and the partitions they belong to.
 
-        The token is the high-water modification time. Objects written during the
-        same second as the token are re-reported rather than skipped: duplicating a
-        rebuild is cheap, missing one is not.
+        The token is a high-water modification time *plus* the etags of the objects
+        sitting exactly on that boundary. Filesystem timestamps have coarse
+        resolution, so a strict `>` comparison would miss a file written in the same
+        tick as the last one we saw, while a `>=` comparison would re-report the
+        newest files forever. Carrying the boundary etags gives both properties:
+        nothing is missed, and a quiet dataset converges to reporting nothing.
         """
-        cutoff: datetime | None = None
-        if since:
-            try:
-                cutoff = datetime.fromisoformat(since)
-            except ValueError:
-                cutoff = None
+        cutoff, seen = _decode_token(since)
 
         touched: list[ObjectMeta] = []
         high_water = cutoff
+        boundary: set[str] = set()
+
         for obj in self.list_objects(dataset):
             if obj.modified is None:
                 continue
             if high_water is None or obj.modified > high_water:
                 high_water = obj.modified
-            if cutoff is None or obj.modified >= cutoff:
+                boundary = set()
+            if obj.modified == high_water and obj.etag:
+                boundary.add(obj.etag)
+            if cutoff is None or (obj.modified >= cutoff and obj.etag not in seen):
                 touched.append(obj)
 
         partitions = frozenset(self.key_for(dataset, o.path) for o in touched)
         return ChangeSet(
             partitions=partitions,
-            token=high_water.isoformat() if high_water else (since or ""),
+            token=_encode_token(high_water, boundary),
             complete=True,
             objects=tuple(touched),
         )
