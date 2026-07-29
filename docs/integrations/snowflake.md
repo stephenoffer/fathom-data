@@ -41,7 +41,7 @@ lineage:
 ```python
 import os, snowflake.connector
 from fathom.adapters import DBAPIRunner
-from fathom.project import Project
+from fathom.cli.project import Project
 
 connection = snowflake.connector.connect(
     account=os.environ["SNOWFLAKE_ACCOUNT"],

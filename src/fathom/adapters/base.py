@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-from ..types import (
+from ..core.types import (
     UNPARTITIONED,
     Capabilities,
     ChangeSource,
@@ -35,6 +35,7 @@ from ..types import (
 __all__ = [
     "CatalogAdapter",
     "ChangeSet",
+    "DeclaredCatalog",
     "EngineAdapter",
     "LineageEvent",
     "ObjectMeta",
@@ -52,6 +53,8 @@ Token = str
 
 @dataclass(frozen=True)
 class ObjectMeta:
+    """One object in storage: where it is, how big, and when it last changed."""
+
     path: str
     size: int = 0
     etag: str | None = None
@@ -74,6 +77,7 @@ class ChangeSet:
 
     @property
     def is_empty(self) -> bool:
+        """True when nothing changed."""
         return not self.partitions and not self.objects
 
 
@@ -107,9 +111,23 @@ class StorageAdapter(Protocol):
     name: str
     capabilities: Capabilities
 
-    def list_objects(self, dataset: DatasetId) -> Iterable[ObjectMeta]: ...
+    def list_objects(self, dataset: DatasetId) -> Iterable[ObjectMeta]:
+        """Every object under the dataset's prefix, with size and modification time.
 
-    def changed(self, dataset: DatasetId, since: Token | None) -> ChangeSet: ...
+        A full listing, and on a large prefix an expensive one — `changed` exists so
+        the common case does not have to pay for it.
+        """
+        ...
+
+    def changed(self, dataset: DatasetId, since: Token | None) -> ChangeSet:
+        """What changed since `since`, and a token to resume from next time.
+
+        `since` of None means "everything", which is the first run. Returning a
+        `ChangeSet` with `complete=False` says the source could not enumerate
+        exhaustively, and callers must treat that as "assume everything changed"
+        rather than as the empty set.
+        """
+        ...
 
     def paths(self, objects: Sequence[ObjectMeta]) -> list[str]:
         """URIs a filesystem can open, in the same order as the objects given."""
@@ -123,9 +141,22 @@ class CatalogAdapter(Protocol):
     name: str
     capabilities: Capabilities
 
-    def describe_partitioning(self, dataset: DatasetId) -> PartitionSpec: ...
+    def describe_partitioning(self, dataset: DatasetId) -> PartitionSpec:
+        """How this table is partitioned, as the planner needs to see it.
 
-    def changed(self, dataset: DatasetId, since: Token | None) -> ChangeSet: ...
+        Return `UNPARTITIONED` when the catalog does not say, never a guess: a
+        fabricated grain makes every mapping composed across this dataset wrong,
+        and wrong is the one thing the planner cannot recover from.
+        """
+        ...
+
+    def changed(self, dataset: DatasetId, since: Token | None) -> ChangeSet:
+        """Partitions touched since `since`, from commit metadata where available.
+
+        Cheaper and more precise than listing objects, because the table format
+        already recorded which files each commit wrote.
+        """
+        ...
 
 
 @runtime_checkable
@@ -165,12 +196,22 @@ def register(name: str) -> Callable[[type], type]:
 
 
 def get_adapter(name: str) -> type:
+    """The adapter class registered under `name`.
+
+    Raises `KeyError` naming everything that *is* registered, because the usual
+    cause is a typo or a missing optional dependency whose import never ran.
+    """
     if name not in _REGISTRY:
         raise KeyError(f"no adapter named {name!r}; registered: {sorted(_REGISTRY)}")
     return _REGISTRY[name]
 
 
 def registered() -> list[str]:
+    """Names of every adapter currently importable, sorted.
+
+    Only reflects modules that have been imported: an adapter behind an optional
+    extra is absent until its package is installed and its module loads.
+    """
     return sorted(_REGISTRY)
 
 
@@ -192,10 +233,17 @@ class DeclaredCatalog:
     )
 
     def declare(self, dataset: DatasetId, spec: PartitionSpec) -> None:
+        """Record how a dataset is partitioned. Last declaration wins."""
         self.specs[dataset] = spec
 
     def describe_partitioning(self, dataset: DatasetId) -> PartitionSpec:
+        """The declared spec, or `UNPARTITIONED` for anything never declared."""
         return self.specs.get(dataset, UNPARTITIONED)
 
     def changed(self, dataset: DatasetId, since: Token | None) -> ChangeSet:
+        """Always empty: a hand-declared catalog has no way to detect change.
+
+        The token is echoed back unchanged so a caller storing it sees no movement,
+        rather than a cursor that appears to advance over data nobody examined.
+        """
         return ChangeSet(token=since or "")

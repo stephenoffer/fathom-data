@@ -22,13 +22,14 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-from ..errors import FathomError
+from ..core.errors import FathomError
 
 __all__ = [
     "DBAPIRunner",
     "QueryError",
     "QueryRunner",
     "RecordedRunner",
+    "chunked",
     "quote_identifier",
 ]
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fathom import Grain, PartitionField, PartitionSpec
 from fathom.adapters import DuckDBEngine
-from fathom.ids import normalize_table
+from fathom.core.ids import normalize_table
 
 RAW = normalize_table("raw.events", system="duckdb")
 SILVER = normalize_table("silver.events", system="duckdb")

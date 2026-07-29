@@ -17,12 +17,12 @@ import duckdb
 import pytest
 
 from fathom import shadow
-from fathom.adapters.duckdb_engine import DuckDBEngine, render_predicate
-from fathom.grains import Grain
-from fathom.ids import normalize_table
+from fathom.adapters.engines.duckdb import DuckDBEngine, render_predicate
+from fathom.core.grains import Grain
+from fathom.core.ids import normalize_table
+from fathom.core.types import ANY, KeyPredicate, PartitionField, PartitionSpec
 from fathom.ingest import ingest_engine
 from fathom.store import Store
-from fathom.types import ANY, KeyPredicate, PartitionField, PartitionSpec
 
 RAW = normalize_table("raw.events", system="duckdb")
 SILVER = normalize_table("silver.events", system="duckdb")

@@ -19,7 +19,7 @@ from datetime import datetime
 from examples_common import GOLD, RAW, SILVER, SPECS, build_warehouse
 
 from fathom import Capabilities, ChangeSource, ErasureMode, KeyPredicate, LineageSource
-from fathom.erasure import ErasureRequest, apply_erasure, plan_erasure, unerasable
+from fathom.govern.erasure import ErasureRequest, apply_erasure, plan_erasure, unerasable
 from fathom.ingest import ingest_engine
 
 
@@ -27,6 +27,9 @@ def caps(mode: ErasureMode) -> Capabilities:
     return Capabilities(
         lineage=LineageSource.QUERY_LOG, change=ChangeSource.WATERMARK, erasure=mode
     )
+
+
+SALT = "org-secret"  # per-organization secret; keeps the proof digest non-reversible
 
 
 def main() -> None:
@@ -71,7 +74,7 @@ def main() -> None:
     print(f"\nBefore: March/eu revenue = {before[(datetime(2026, 3, 1), 'eu')]}")
 
     # --- 3. dry run changes nothing ------------------------------------------
-    proof = apply_erasure(plan, {RAW: engine, SILVER: engine, GOLD: engine})
+    proof = apply_erasure(plan, {RAW: engine, SILVER: engine, GOLD: engine}, salt=SALT)
     assert not proof.executed
     print("Dry run (the default) changed nothing.")
 
@@ -80,7 +83,7 @@ def main() -> None:
         plan,
         {RAW: engine, SILVER: engine, GOLD: engine},
         dry_run=False,
-        salt="org-secret",
+        salt=SALT,
     )
 
     after = {row[0:2]: row[2] for row in engine.rows(GOLD)}

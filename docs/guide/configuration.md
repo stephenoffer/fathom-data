@@ -182,6 +182,68 @@ reading a failed CI job can act on.
 
 Checked by `fathom label`, which exits non-zero on any violation.
 
+## `publications`
+
+Where a number stops being data and becomes a published claim.
+
+```yaml
+publications:
+  - name: revenue/exec
+    kind: dashboard
+    instance: looker
+    inputs: [gold.monthly]
+
+  - name: 10-K/2026
+    kind: filing
+    instance: sec
+    inputs: [gold.monthly, silver.revenue]
+```
+
+`kind` is one of `dashboard`, `report`, `filing`, `export`, `endpoint`, or
+`notebook`. `instance` names the system it lives in — the BI tool, the regulator,
+the recipient. `inputs` are the datasets it draws on, and at least one is required:
+a publication with no inputs records nothing.
+
+These are **declared, not discovered**. No BI tool exposes its queries uniformly, and
+a guessed dashboard dependency is worse than an absent one — a restatement notice
+built on a guess names the wrong people.
+
+Read by `fathom impact`, which lists every published artefact downstream of a dataset
+and drafts the notice. It exits non-zero when a filing or signed report is among them,
+because the remedy there is an amendment rather than a refresh.
+
+Publications are re-applied from config on every load rather than persisted as
+ordinary edges, so deleting one here removes it from the graph. A declared artefact
+that outlived its declaration would keep appearing in notices, and the value of a
+notice is that it is current.
+
+## `contracts`
+
+What one team promises another about a dataset.
+
+```yaml
+contracts:
+  - dataset: gold.orders
+    producer: platform
+    consumers: [finance, ml]
+    columns: [order_id, amount, currency]
+    max_staleness: 6h
+    note: the close depends on this landing before 09:00
+```
+
+`producer` is required — a contract with no owner names nobody when it is breached,
+which is the one thing a contract adds over the checks that already existed.
+
+`columns` are promised to exist; extra columns are permitted. `max_staleness` takes a
+number and a unit (`30m`, `6h`, `2d`, `1w`). A bare number is rejected, because every
+config format that accepts one ends up with two readers silently disagreeing about
+whether it meant seconds or hours.
+
+Checked by `fathom contracts`, which exits non-zero on any error. **Severity follows
+the blast radius**: the same missing column is a warning against a dataset nobody
+consumes and an error against one three teams read. A promise with no evidence
+supplied is reported as unchecked rather than passing silently.
+
 ## Adapter options
 
 Passed straight to the adapter constructor:

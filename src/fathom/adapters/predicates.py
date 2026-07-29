@@ -21,10 +21,21 @@ from collections.abc import Iterable
 from datetime import date, datetime
 from typing import Any
 
-from ..grains import step
-from ..types import ANY, KeyPredicate, PartitionSpec
+from ..core.grains import step
+from ..core.types import ANY, KeyPredicate, PartitionSpec
 
-__all__ = ["literal", "render_predicate"]
+__all__ = ["identifier", "literal", "render_predicate"]
+
+
+def identifier(name: str, *, quote: str = '"') -> str:
+    """Quote a column or table name, escaping the quote character inside it.
+
+    Values were escaped and identifiers were not, so a partition field or key column
+    containing the quote character broke straight out of its own quoting. These names
+    reach the renderer from `fathom.yml` and from `--key-column`, and the statements
+    they land in include `DELETE`.
+    """
+    return quote + name.replace(quote, quote * 2) + quote
 
 
 def literal(value: Any) -> str:
@@ -47,7 +58,7 @@ def _key_sql(spec: PartitionSpec, key: KeyPredicate, quote: str) -> str:
     clauses: list[str] = []
     for f in spec.fields:
         value = key.get(f.name)
-        column = f"{quote}{f.name}{quote}"
+        column = identifier(f.name, quote=quote)
         if value is ANY:
             continue
         if value is None:

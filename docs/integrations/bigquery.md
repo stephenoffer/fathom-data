@@ -40,7 +40,7 @@ lineage:
 from google.cloud import bigquery
 from google.cloud.bigquery import dbapi
 from fathom.adapters import DBAPIRunner
-from fathom.project import Project
+from fathom.cli.project import Project
 
 connection = dbapi.Connection(bigquery.Client(project="my-project"))
 

@@ -9,8 +9,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from fathom.grains import Grain
-from fathom.types import PartitionField, PartitionSpec
+from fathom.core.grains import Grain
+from fathom.core.types import PartitionField, PartitionSpec
 
 DAY_REGION = PartitionSpec.of(PartitionField.time("dt", Grain.DAY), PartitionField.value("region"))
 

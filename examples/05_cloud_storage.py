@@ -17,8 +17,8 @@ import fsspec
 
 from fathom import KeyPredicate
 from fathom.adapters import DeltaCatalog
-from fathom.fs import clear_cache
-from fathom.types import DatasetId
+from fathom.adapters.fs import clear_cache
+from fathom.core.types import DatasetId
 
 SCHEMA = json.dumps(
     {

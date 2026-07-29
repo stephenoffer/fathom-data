@@ -37,7 +37,7 @@ arrived since the first.
 ```python
 from datetime import datetime
 from fathom import KeyPredicate
-from fathom.project import Project
+from fathom.cli.project import Project
 
 with Project.load() as project:
     plan = project.plan({
@@ -133,3 +133,31 @@ work with.
 
 Time values are ISO 8601 and truncate to the field's declared grain, so
 `dt=2026-03-14T15:00:00` on a day-grained field means `2026-03-14`.
+
+## Handing it to an orchestrator
+
+A plan is only worth as much as the thing that runs it. `fathom dag` generates the
+file your scheduler already reads:
+
+```bash
+fathom dag --flavor airflow --dirty 'raw.events@dt=2026-03-14' --out dags/rebuild.py
+fathom dag --flavor dagster   # or prefect, shell, json
+```
+
+Nothing imports Airflow, Dagster, or Prefect. The output is a file you commit and
+read, not a runtime binding — a library that pulls in an orchestrator to be imported
+is a library people vendor around.
+
+Two properties the generated file keeps, because losing either makes it worse than no
+file at all:
+
+- **Wave boundaries are real dependencies**, not ordering hints. Emitting them as a
+  sequence the scheduler may reinterpret is how a downstream table gets rebuilt from
+  an upstream one that has not been written yet.
+- **Partition keys travel with the task.** A task that says "rebuild `gold.monthly`"
+  without saying which partitions has thrown away the entire point, and will quietly
+  full-rebuild.
+
+Intervals, retries, alerting, and connection ids are deliberately absent. Those are
+decisions about your platform, and a generator guessing at them would be wrong in a
+way that looks authoritative. The generated header says so.

@@ -81,7 +81,7 @@ def test_every_registered_adapter_is_documented():
 
 
 def test_config_reference_covers_every_top_level_key():
-    from fathom.config import _TOP_LEVEL
+    from fathom.cli.config import _TOP_LEVEL
 
     reference = (ROOT / "docs/guide/configuration.md").read_text()
     for key in _TOP_LEVEL:
@@ -92,3 +92,55 @@ def test_adrs_are_linked_from_the_readme():
     readme = (ROOT / "README.md").read_text()
     for adr in sorted((ROOT / "docs/adr").glob("*.md")):
         assert adr.name in readme, f"{adr.name} is not linked from the README"
+
+
+def python_symbols(doc: Path) -> set[tuple[str, str]]:
+    """`module, name` pairs a document claims exist, from imports and dotted calls.
+
+    Two shapes cover what the guides actually write: an explicit
+    `from fathom.x import a, b`, and a call on a module alias the same document
+    imported. Anything else is prose and is left alone.
+    """
+    text = doc.read_text()
+    found: set[tuple[str, str]] = set()
+
+    aliases: dict[str, str] = {}
+    for match in re.finditer(r"from (fathom[\w.]*) import ([\w, ]+(?: as \w+)?)", text):
+        for entry in match.group(2).split(","):
+            name, _, alias = (part.strip() for part in entry.strip().partition(" as "))
+            if not name:
+                continue
+            found.add((match.group(1), name))
+            # `from fathom.ai import training` then `training.stale_models(...)`
+            aliases[alias or name] = f"{match.group(1)}.{name}"
+    for match in re.finditer(r"\b(\w+)\.(\w+)\(", text):
+        module = aliases.get(match.group(1))
+        if module:
+            found.add((module, match.group(2)))
+    return found
+
+
+@pytest.mark.parametrize("doc", DOCS, ids=lambda p: str(p.relative_to(ROOT)))
+def test_every_documented_symbol_exists(doc: Path):
+    """Documentation that names a function nobody kept is worse than none."""
+    import importlib
+
+    def resolve(dotted: str) -> object | None:
+        """A dotted path is a module, or an attribute of one. Both are valid to document."""
+        try:
+            return importlib.import_module(dotted)
+        except ImportError:
+            head, _, tail = dotted.rpartition(".")
+            if not head:
+                return None
+            parent = resolve(head)
+            return getattr(parent, tail, None) if parent is not None else None
+
+    missing = []
+    for module, name in sorted(python_symbols(doc)):
+        resolved = resolve(module)
+        if resolved is None:
+            missing.append(f"{module} (does not resolve)")
+        elif not hasattr(resolved, name):
+            missing.append(f"{module}.{name}")
+    assert not missing, f"{doc.relative_to(ROOT)} names things that do not exist: {missing}"

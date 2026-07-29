@@ -16,8 +16,8 @@ from datetime import datetime
 from pathlib import Path
 
 from fathom import KeyPredicate
-from fathom.ids import normalize_table
-from fathom.integrations import ingest_dbt, parse_manifest
+from fathom.core.ids import normalize_table
+from fathom.ingest import ingest_dbt, parse_manifest
 
 MANIFEST = {
     "metadata": {

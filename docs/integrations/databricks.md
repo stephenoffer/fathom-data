@@ -47,7 +47,7 @@ lineage:
 import os
 from databricks import sql
 from fathom.adapters import DBAPIRunner
-from fathom.project import Project
+from fathom.cli.project import Project
 
 connection = sql.connect(
     server_hostname=os.environ["DATABRICKS_HOST"],

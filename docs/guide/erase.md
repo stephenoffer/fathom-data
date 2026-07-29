@@ -56,7 +56,7 @@ produced identical output, reported success, and the proof said complete. See
 The CLI never executes. Executing needs a live engine binding:
 
 ```python
-from fathom.erasure import ErasureRequest, apply_erasure
+from fathom.govern.erasure import ErasureRequest, apply_erasure
 
 request = ErasureRequest(
     subject="u1",

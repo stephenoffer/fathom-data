@@ -61,7 +61,7 @@ Implement the protocol for your surface and register it:
 
 ```python
 from fathom.adapters.base import ChangeSet, register
-from fathom.types import Capabilities, ChangeSource, LineageSource
+from fathom.core.types import Capabilities, ChangeSource, LineageSource
 
 @register("mysystem")
 @dataclass

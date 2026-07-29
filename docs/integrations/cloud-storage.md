@@ -118,7 +118,7 @@ project.profile(dataset, partition=KeyPredicate.of(dt=datetime(2026, 3, 14)))
 
 **Filesystems are cached per protocol and options.** A new client per dataset means
 a TLS handshake and credential resolution for every partition you touch. Rotating
-credentials mid-process needs `fathom.fs.clear_cache()`.
+credentials mid-process needs `fathom.adapters.fs.clear_cache()`.
 
 **Prefer `SNAPSHOT_DIFF`.** The difference between reading three commit files and
 listing a bucket is several orders of magnitude.

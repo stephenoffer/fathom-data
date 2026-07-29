@@ -14,7 +14,7 @@ from datetime import datetime
 
 from fathom import Grain, KeyPredicate, PartitionField, PartitionSpec
 from fathom.adapters import DuckDBEngine
-from fathom.ids import normalize_table
+from fathom.core.ids import normalize_table
 from fathom.ingest import ingest_engine
 
 RAW = normalize_table("raw.events", system="duckdb")

@@ -134,7 +134,7 @@ worth doing once.
 Detectors are name-and-type patterns with an optional statistical check:
 
 ```python
-from fathom.policy import _Detector, _DETECTORS  # to be made public in a later release
+from fathom.govern.policy import _Detector, _DETECTORS  # to be made public in a later release
 ```
 
 Two rules if you add one. Keep confidence below 0.9 for a name-only match, and add a

@@ -99,7 +99,7 @@ skips statistics, which is worse than reporting nothing.
 ## Scoping to one partition
 
 ```python
-from fathom.project import Project
+from fathom.cli.project import Project
 
 with Project.load() as project:
     got = project.profile(dataset, partition=KeyPredicate.of(dt=datetime(2026, 3, 14)))

@@ -18,6 +18,30 @@
 Plus **[shadow mode](guide/shadow.md)**, which is how you decide whether to trust
 `plan` at all. Read it before wiring anything into a pipeline that writes.
 
+## The same four verbs, over AI assets
+
+**[AI assets](guide/ai.md)** — a model, feature view, vector index, prompt, and eval
+set are datasets, so the graph, planner, profiler, policy engine, and eraser already
+work on them. Retraining becomes an invalidation question, re-embedding costs what
+changed, a leaked eval set is a reachability check, and an erasure request that
+reaches a model says so instead of reporting `complete: true`.
+
+## Beyond the four
+
+| Guide | Answers |
+|---|---|
+| [completeness](guide/completeness.md) | Which partitions should exist and do not? |
+| [usage, value, impact](guide/value.md) | Who reads this, what has it cost, and what have we already published from it? |
+| [contracts, risk](guide/contracts.md) | What did we promise whom, and what do the columns jointly reveal? |
+
+`check` and `plan` both read data that arrived. `completeness` is the only thing that
+can see the partition that never did — it has no profile to drift and no rows to fail
+an expectation. The `value` guide covers the three questions that live outside the
+warehouse: who reads a table, what it has cost, and which dashboards and filings a
+restatement would touch. The `contracts` guide covers the two checks that read the
+same profiles as everything else and answer what per-column analysis structurally
+cannot: who a breach is owed to, and which columns identify nobody alone.
+
 ## Platforms
 
 | Platform | Lineage | Change detection |

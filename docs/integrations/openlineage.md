@@ -92,7 +92,7 @@ The `symlinks` facet names the same bytes under another identity — exactly the
 ```
 
 ```python
-from fathom.ids import AliasRegistry
+from fathom.core.ids import AliasRegistry
 
 registry = AliasRegistry()
 ingest_openlineage(events, aliases=registry)
@@ -124,7 +124,7 @@ ingest_openlineage(events, include_failed=True)
 ## From Python
 
 ```python
-from fathom.integrations import ingest_openlineage, load_events
+from fathom.ingest import ingest_openlineage, load_events
 
 events = load_events("s3://lineage/events/")
 result = ingest_openlineage(events, specs=specs, aliases=registry)
