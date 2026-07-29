@@ -90,6 +90,7 @@ fathom explain               # list every topic
 Runnable projects live in [`examples/`](../examples/). Each is self-contained and
 tested in CI, so they cannot rot:
 
+- [`00_five_minutes.py`](../examples/00_five_minutes.py) — the whole idea, with nothing installed
 - [`01_local_lakehouse.py`](../examples/01_local_lakehouse.py) — the whole loop on local Parquet
 - [`02_shadow_mode.py`](../examples/02_shadow_mode.py) — proving the planner before trusting it
 - [`03_dbt_project.py`](../examples/03_dbt_project.py) — building a graph from a dbt manifest

@@ -122,7 +122,7 @@ datasets:
 
 
 def test_dataset_without_a_name_is_rejected(tmp_path):
-    with pytest.raises(ConfigError, match="missing `name`"):
+    with pytest.raises(ConfigError, match="needs a `name`"):
         load_config(write(tmp_path, "version: 1\ndatasets:\n  - partition: [dt]\n"))
 
 
@@ -248,3 +248,91 @@ def test_parse_config_accepts_a_mapping(tmp_path):
 def test_non_mapping_config_is_rejected(tmp_path):
     with pytest.raises(ConfigError, match="mapping at the top level"):
         parse_config(["not", "a", "mapping"], root=tmp_path)  # type: ignore[arg-type]
+
+
+# -- messages that teach the shape ---------------------------------------------
+#
+# A config file is the first thing a new user writes and the thing they have least
+# to go on. Each of these asserts the message shows the YAML that would have worked,
+# because "invalid partition entry" sends the reader back to the documentation and a
+# worked example does not.
+
+
+def test_an_unknown_key_suggests_the_one_that_was_meant(tmp_path):
+    path = write(tmp_path, "version: 1\nsystm: duckdb\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(path)
+    message = str(exc.value)
+    assert "Did you mean 'system'?" in message
+    assert "Valid keys here:" in message
+
+
+def test_a_bare_string_partition_is_accepted_as_a_single_value_field(tmp_path):
+    """`partition: region` is unambiguous, so making the reader bracket it is noise."""
+    path = write(tmp_path, "version: 1\ndatasets:\n  - name: raw.events\n    partition: region\n")
+    assert load_config(path).datasets[0].spec.names == ("region",)
+
+
+def test_a_partition_that_is_not_a_list_shows_one_that_is(tmp_path):
+    path = write(tmp_path, "version: 1\ndatasets:\n  - name: raw.events\n    partition: 3\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(path)
+    assert "{field: dt, grain: day}" in str(exc.value)
+
+
+def test_a_partition_entry_missing_field_names_the_key(tmp_path):
+    path = write(
+        tmp_path,
+        "version: 1\ndatasets:\n  - name: raw.events\n    partition:\n      - {grain: day}\n",
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_config(path)
+    assert "needs a `field`" in str(exc.value)
+
+
+def test_an_unknown_grain_suggests_a_real_one(tmp_path):
+    path = write(
+        tmp_path,
+        "version: 1\ndatasets:\n  - name: raw.events\n"
+        "    partition:\n      - {field: dt, grain: daly}\n",
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_config(path)
+    assert "Did you mean 'day'?" in str(exc.value)
+
+
+def test_a_grain_written_as_an_adjective_is_accepted(tmp_path):
+    """Config files write `day`, cron descriptions write `daily`. Both mean one thing."""
+    path = write(
+        tmp_path,
+        "version: 1\ndatasets:\n  - name: raw.events\n"
+        "    partition:\n      - {field: dt, grain: daily}\n",
+    )
+    config = load_config(path)
+    assert config.datasets[0].spec.field("dt").grain is Grain.DAY
+
+
+def test_a_top_level_list_says_how_to_see_the_right_shape(tmp_path):
+    path = write(tmp_path, "- version: 1\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(path)
+    message = str(exc.value)
+    assert "stray leading `-`" in message
+    assert "fathom init" in message
+
+
+def test_a_duplicate_dataset_explains_why_it_cannot_be_merged(tmp_path):
+    path = write(
+        tmp_path,
+        "version: 1\ndatasets:\n  - name: raw.events\n  - name: raw.events\n",
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_config(path)
+    assert "nothing can arbitrate between them" in str(exc.value)
+
+
+def test_an_unsupported_version_offers_the_likely_cause(tmp_path):
+    path = write(tmp_path, "version: 2\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(path)
+    assert "typo" in str(exc.value)

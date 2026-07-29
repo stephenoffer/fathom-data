@@ -15,6 +15,27 @@ Three properties hold across this module:
 - **Absence is empty, not an error.** Asking for the descendants of a dataset that
   is not in the graph yields `[]`. Callers frequently probe with identities they
   are not yet sure exist.
+
+**Which one do I want.** There are a lot of functions here, and most of the time the
+question is one of these:
+
+    what feeds this / what does it feed    parents, children
+    ...transitively                        ancestors, descendants
+    ...both directions                     relatives, closure
+    how bad is it if I break this          blast_radius
+    are these two related at all           has_path, is_upstream_of
+    how are they related                   shortest_path, paths_between, between
+    what does the whole path imply         effective_mapping
+    where does the graph start and end     roots, leaves, isolated
+    what order do I build in               topological_order, levels
+    is anything self-referencing           has_cycle, cycles
+    where did these two diverge            common_ancestors, lowest_common_ancestors
+    just this part of the graph            subgraph, upstream_subgraph, prune
+    find it by name or tag                 find, select, in_namespace
+
+`effective_mapping` is the one worth knowing about early: given a path, it composes
+every mapping along it into one, which is how you find out what a change three hops
+up actually reaches — and where on the path precision was lost.
 """
 
 from __future__ import annotations
@@ -101,12 +122,28 @@ T = TypeVar("T")
 
 
 def parents(graph: Graph, ds: DatasetId) -> list[DatasetId]:
-    """Datasets feeding `ds` directly."""
+    """Datasets feeding `ds` directly.
+
+    Example:
+        >>> g = Graph()
+        >>> _ = g.connect("duckdb/raw", "duckdb/silver", evidence="sql")
+        >>> _ = g.connect("duckdb/silver", "duckdb/gold", evidence="sql")
+        >>> [str(d) for d in parents(g, DatasetId("duckdb", "silver"))]
+        ['duckdb/raw']
+    """
     return sorted({e.src for e in graph.in_edges(ds)}, key=str)
 
 
 def children(graph: Graph, ds: DatasetId) -> list[DatasetId]:
-    """Datasets `ds` feeds directly."""
+    """Datasets `ds` feeds directly.
+
+    Example:
+        >>> g = Graph()
+        >>> _ = g.connect("duckdb/raw", "duckdb/silver", evidence="sql")
+        >>> _ = g.connect("duckdb/silver", "duckdb/gold", evidence="sql")
+        >>> [str(d) for d in children(g, DatasetId("duckdb", "silver"))]
+        ['duckdb/gold']
+    """
     return sorted({e.dst for e in graph.out_edges(ds)}, key=str)
 
 
@@ -116,7 +153,11 @@ def neighbors(graph: Graph, ds: DatasetId) -> list[DatasetId]:
 
 
 def siblings(graph: Graph, ds: DatasetId) -> list[DatasetId]:
-    """Other datasets sharing at least one direct parent with `ds`."""
+    """Other datasets sharing at least one direct parent with `ds`.
+
+    Built from the same inputs, so they usually break together — which is why this
+    is worth asking when triaging an incident rather than after it.
+    """
     out: set[DatasetId] = set()
     for parent in parents(graph, ds):
         out.update(children(graph, parent))
@@ -183,12 +224,34 @@ def _walk(
 
 
 def descendants(graph: Graph, ds: DatasetId, *, max_depth: int = MAX_DEPTH) -> list[DatasetId]:
-    """Everything reachable downstream of `ds`."""
+    """Everything reachable downstream of `ds`.
+
+    The structural answer to "what could this break". For the partition-level answer,
+    which is usually far smaller, plan instead — see `Graph.invalidate`.
+
+    Example:
+        >>> g = Graph()
+        >>> _ = g.connect("duckdb/raw", "duckdb/silver", evidence="sql")
+        >>> _ = g.connect("duckdb/silver", "duckdb/gold", evidence="sql")
+        >>> [str(d) for d in descendants(g, DatasetId("duckdb", "raw"))]
+        ['duckdb/gold', 'duckdb/silver']
+    """
     return sorted(_walk(graph, ds, downstream=True, max_depth=max_depth), key=str)
 
 
 def ancestors(graph: Graph, ds: DatasetId, *, max_depth: int = MAX_DEPTH) -> list[DatasetId]:
-    """Everything `ds` transitively depends on."""
+    """Everything `ds` transitively depends on.
+
+    Note that this excludes `ds` itself. For obligations that travel with the data —
+    licences, consent, erasure — you almost always want `closure`, which includes it.
+
+    Example:
+        >>> g = Graph()
+        >>> _ = g.connect("duckdb/raw", "duckdb/silver", evidence="sql")
+        >>> _ = g.connect("duckdb/silver", "duckdb/gold", evidence="sql")
+        >>> [str(d) for d in ancestors(g, DatasetId("duckdb", "gold"))]
+        ['duckdb/raw', 'duckdb/silver']
+    """
     return sorted(_walk(graph, ds, downstream=False, max_depth=max_depth), key=str)
 
 
@@ -206,6 +269,13 @@ def closure(graph: Graph, ds: DatasetId, *, max_depth: int = MAX_DEPTH) -> list[
     and the erasure walk all mean "this and what it came from". Written out at a
     dozen call sites before it was named, which is a dozen chances to forget the
     dataset itself.
+
+    Example:
+        >>> g = Graph()
+        >>> _ = g.connect("duckdb/raw", "duckdb/silver", evidence="sql")
+        >>> _ = g.connect("duckdb/silver", "duckdb/gold", evidence="sql")
+        >>> [str(d) for d in closure(g, DatasetId("duckdb", "gold"))]
+        ['duckdb/raw', 'duckdb/silver', 'duckdb/gold']
     """
     return [*ancestors(graph, ds, max_depth=max_depth), ds]
 
@@ -249,7 +319,11 @@ def fold_downstream(
 def reachable(
     graph: Graph, seeds: Iterable[DatasetId], *, downstream: bool = True, max_depth: int = MAX_DEPTH
 ) -> list[DatasetId]:
-    """Union of reachability from several seeds, seeds included."""
+    """Union of reachability from several seeds, seeds included.
+
+    Unlike `descendants`, the seeds are part of the result — they changed too, so
+    anything computed over "what this affects" wants them in.
+    """
     out: set[DatasetId] = set()
     for seed in seeds:
         out.add(seed)
@@ -260,7 +334,17 @@ def reachable(
 def blast_radius(graph: Graph, ds: DatasetId, *, max_depth: int = MAX_DEPTH) -> int:
     """How many datasets a change to `ds` can reach.
 
-    The number to put in a pull request comment when someone edits a model.
+    The number to put in a pull request comment when someone edits a model. It is a
+    structural upper bound, not a rebuild estimate — the partition-level answer from
+    a plan is usually far smaller, because most of those datasets only go stale in
+    the partitions that actually read the changed rows.
+
+    Example:
+        >>> g = Graph()
+        >>> _ = g.connect("duckdb/raw", "duckdb/silver", evidence="sql")
+        >>> _ = g.connect("duckdb/silver", "duckdb/gold", evidence="sql")
+        >>> blast_radius(g, DatasetId("duckdb", "raw"))
+        2
     """
     return len(descendants(graph, ds, max_depth=max_depth))
 
@@ -276,12 +360,37 @@ def is_downstream_of(graph: Graph, candidate: DatasetId, target: DatasetId) -> b
 
 
 def has_path(graph: Graph, src: DatasetId, dst: DatasetId) -> bool:
-    """True when data can flow from `src` to `dst`."""
+    """True when data can flow from `src` to `dst`.
+
+    Direction matters and is easy to get backwards: this asks whether `src` is
+    upstream, not whether the two are related. For "related at all", check both ways.
+
+    Example:
+        >>> g = Graph()
+        >>> _ = g.connect("duckdb/raw", "duckdb/silver", evidence="sql")
+        >>> _ = g.connect("duckdb/silver", "duckdb/gold", evidence="sql")
+        >>> raw, gold = DatasetId("duckdb", "raw"), DatasetId("duckdb", "gold")
+        >>> has_path(g, raw, gold), has_path(g, gold, raw)
+        (True, False)
+    """
     return is_downstream_of(graph, dst, src)
 
 
 def distance(graph: Graph, src: DatasetId, dst: DatasetId) -> int | None:
-    """Fewest hops from `src` to `dst`, or None when unreachable."""
+    """Fewest hops from `src` to `dst`, or None when unreachable.
+
+    `None` and `0` are different answers — unreachable, versus the same dataset — so
+    test with `is None` rather than for falsiness.
+
+    Example:
+        >>> g = Graph()
+        >>> _ = g.connect("duckdb/raw", "duckdb/silver", evidence="sql")
+        >>> _ = g.connect("duckdb/silver", "duckdb/gold", evidence="sql")
+        >>> distance(g, DatasetId("duckdb", "raw"), DatasetId("duckdb", "gold"))
+        2
+        >>> distance(g, DatasetId("duckdb", "gold"), DatasetId("duckdb", "raw")) is None
+        True
+    """
     if src == dst:
         return 0
     return _walk(graph, src, downstream=True, max_depth=MAX_DEPTH).get(dst)
@@ -323,7 +432,20 @@ def paths_between(
 
 
 def shortest_path(graph: Graph, src: DatasetId, dst: DatasetId) -> list[DatasetId] | None:
-    """One shortest route from `src` to `dst`, or None when there is none."""
+    """One shortest route from `src` to `dst`, or None when there is none.
+
+    "One" is deliberate: where several routes tie, this returns whichever the walk
+    reached first. Use `paths_between` when you need to see the alternatives, and
+    `effective_mapping` to find out what a route actually implies.
+
+    Example:
+        >>> g = Graph()
+        >>> _ = g.connect("duckdb/raw", "duckdb/silver", evidence="sql")
+        >>> _ = g.connect("duckdb/silver", "duckdb/gold", evidence="sql")
+        >>> route = shortest_path(g, DatasetId("duckdb", "raw"), DatasetId("duckdb", "gold"))
+        >>> [str(d) for d in route]
+        ['duckdb/raw', 'duckdb/silver', 'duckdb/gold']
+    """
     if src == dst:
         return [src]
     frontier: deque[list[DatasetId]] = deque([[src]])
@@ -341,7 +463,18 @@ def shortest_path(graph: Graph, src: DatasetId, dst: DatasetId) -> list[DatasetI
 
 
 def between(graph: Graph, src: DatasetId, dst: DatasetId) -> list[DatasetId]:
-    """Every dataset lying on some path from `src` to `dst`, endpoints included."""
+    """Every dataset lying on some path from `src` to `dst`, endpoints included.
+
+    The subgraph a change has to travel through — which is where to look when the
+    two ends disagree and you need to find the hop that lost precision.
+
+    Example:
+        >>> g = Graph()
+        >>> _ = g.connect("duckdb/raw", "duckdb/silver", evidence="sql")
+        >>> _ = g.connect("duckdb/silver", "duckdb/gold", evidence="sql")
+        >>> [str(d) for d in between(g, DatasetId("duckdb", "raw"), DatasetId("duckdb", "gold"))]
+        ['duckdb/gold', 'duckdb/raw', 'duckdb/silver']
+    """
     forward = set(descendants(graph, src)) | {src}
     backward = set(ancestors(graph, dst)) | {dst}
     return sorted(forward & backward, key=str)
@@ -354,6 +487,25 @@ def effective_mapping(graph: Graph, path: Sequence[DatasetId]) -> PartitionMappi
     concrete set of months at the far end. Where a hop has several parallel edges
     they are joined first, which widens — two disagreeing accounts of the same
     dependency must be covered by the result, not arbitrated between.
+
+    Read the result with `.explain()`. If it comes back unbounded, precision was lost
+    somewhere on the path, and walking the hops one at a time finds where.
+
+    Example:
+        >>> from fathom.core.partitions import PartitionMapping
+        >>> from fathom.core.types import PartitionSpec
+        >>> daily = PartitionSpec.parse("dt:day")
+        >>> monthly = PartitionSpec.parse("dt:month")
+        >>> g = Graph()
+        >>> _ = g.connect("duckdb/raw", "duckdb/silver", evidence="sql",
+        ...               src_spec=daily, dst_spec=daily,
+        ...               mapping=PartitionMapping.identity(daily))
+        >>> _ = g.connect("duckdb/silver", "duckdb/gold", evidence="sql",
+        ...               dst_spec=monthly,
+        ...               mapping=PartitionMapping.rollup(daily, monthly))
+        >>> path = [DatasetId("duckdb", n) for n in ("raw", "silver", "gold")]
+        >>> print(effective_mapping(g, path).explain())
+        dt: a dirty dt day taints 2 month(s) around the month containing it
     """
     if len(path) < 2:
         return PartitionMapping.identity(graph.spec(path[0])) if path else PartitionMapping()
@@ -371,7 +523,12 @@ def effective_mapping(graph: Graph, path: Sequence[DatasetId]) -> PartitionMappi
 
 
 def edges_between(graph: Graph, src: DatasetId, dst: DatasetId) -> list[Edge]:
-    """All parallel edges from `src` to `dst`, sorted by evidence."""
+    """All parallel edges from `src` to `dst`, sorted by evidence.
+
+    More than one is normal: the same dependency learned from a dbt manifest and
+    from a query log is two edges, kept separately so each keeps its own evidence.
+    Use `edge_between` for the single mapping that covers them all.
+    """
     return sorted((e for e in graph.out_edges(src) if e.dst == dst), key=lambda e: e.evidence)
 
 
@@ -395,12 +552,20 @@ def edge_between(graph: Graph, src: DatasetId, dst: DatasetId) -> PartitionMappi
 
 
 def roots(graph: Graph) -> list[DatasetId]:
-    """Datasets with no upstream in this graph — the sources."""
+    """Datasets with no upstream in this graph — the sources.
+
+    Where seeds come from. A dataset here that you did not expect usually means an
+    edge was not learned, not that the table has no inputs.
+    """
     return sorted((ds for ds in graph.datasets if not graph.in_edges(ds)), key=str)
 
 
 def leaves(graph: Graph) -> list[DatasetId]:
-    """Datasets with no downstream — the things people actually consume."""
+    """Datasets with no downstream — the things people actually consume.
+
+    Note that a leaf in the graph is not the end of the story: what reads it may be
+    a dashboard or a filing, which are modelled as sinks. See `fathom.sinks`.
+    """
     return sorted((ds for ds in graph.datasets if not graph.out_edges(ds)), key=str)
 
 
@@ -408,7 +573,9 @@ def isolated(graph: Graph) -> list[DatasetId]:
     """Datasets with no edges at all.
 
     Usually a normalization failure: the same table spelled two ways, so one copy
-    holds all the edges and the other floats free.
+    holds all the edges and the other floats free. Declaring an alias between the two
+    collapses them; until then, a plan seeded at one reaches nothing that reads the
+    other. `fathom doctor` reports these.
     """
     return sorted(
         (ds for ds in graph.datasets if not graph.in_edges(ds) and not graph.out_edges(ds)),

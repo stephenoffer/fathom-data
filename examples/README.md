@@ -5,6 +5,7 @@ what happened. They are executed by `tests/test_examples.py` in CI, so they cann
 drift from the code.
 
 ```bash
+python examples/00_five_minutes.py
 python examples/01_local_lakehouse.py
 python examples/02_shadow_mode.py
 python examples/03_dbt_project.py
@@ -15,6 +16,7 @@ python examples/06_worth_keeping.py
 
 | Example | Shows |
 |---|---|
+| `00_five_minutes` | The whole idea with nothing installed: a graph, a plan, and what widening costs |
 | `01_local_lakehouse` | The whole loop: detect, plan, apply, and verify against a full rebuild |
 | `02_shadow_mode` | Grading the planner, including catching a deliberately wrong plan |
 | `03_dbt_project` | Building a graph from a dbt manifest, with mappings recovered from compiled SQL |
@@ -24,8 +26,13 @@ python examples/06_worth_keeping.py
 
 ## Reading them in order
 
-`01` is the one to read first — it ends by asserting that an incremental rebuild is
-byte-identical to a full one, which is the claim everything else rests on.
+`00` is the one to read first. It needs nothing but the base install — no warehouse,
+no object store, no config file — and it shows the three things worth understanding
+before anything else: what a partition mapping is, what a plan looks like, and what
+happens when nothing could be proven.
+
+`01` is next. It ends by asserting that an incremental rebuild is byte-identical to a
+full one, which is the claim everything else rests on.
 
 `02` is the one to read before using any of this in production.
 

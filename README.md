@@ -10,9 +10,14 @@ platforms — computed from one graph, so they agree with each other.
 > writes to your data by default.
 
 **New to this?** [**What fathom is**](docs/guide/what-is-fathom.md) explains the
-problem in plain terms and defines the vocabulary.
+problem in plain terms and defines the vocabulary. Or run the five-minute example,
+which needs nothing but the base install:
 
-[Documentation](docs/) · [Getting started](docs/guide/getting-started.md) · [Examples](examples/)
+```bash
+pip install fathom-data && python examples/00_five_minutes.py
+```
+
+[Documentation](docs/) · [Getting started](docs/guide/getting-started.md) · [Cookbook](docs/guide/cookbook.md) · [FAQ](docs/guide/faq.md) · [Examples](examples/)
 
 ---
 
@@ -127,6 +132,14 @@ fathom shadow        # accumulated savings, and the miss count
 
 Everything is configured in [`fathom.yml`](docs/guide/configuration.md), so partition
 specs live in one place rather than drifting across invocations.
+
+Every term in that output has an explanation at the terminal, next to the message
+that raised the question rather than in a browser tab:
+
+```bash
+fathom explain widening      # why a plan rebuilt more than you expected
+fathom explain               # list every topic
+```
 
 ## The core invariant
 

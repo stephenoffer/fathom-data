@@ -83,6 +83,9 @@ UNLIMITED = 64
 class SelectorError(ValueError):
     """A selector could not be parsed, or named nothing.
 
+    Derives from `ValueError`, so callers that already guard against bad input keep
+    working. Every message names the offending term and the forms that are accepted.
+
     Naming nothing is an error rather than an empty result on purpose: a CI job
     guarding `+gold.revenue` should fail loudly when the model is renamed, not
     quietly start checking zero datasets.
@@ -116,10 +119,23 @@ class Term:
 
 
 def parse_term(text: str) -> Term:
-    """Parse one selector atom. Raises `SelectorError` on anything unrecognizable."""
+    """Parse one selector atom. Raises `SelectorError` on anything unrecognizable.
+
+    Example:
+        >>> str(parse_term("+gold.revenue"))
+        '+gold.revenue'
+        >>> parse_term("2+gold.revenue").upstream
+        2
+        >>> parse_term("tag:pii").kind
+        'tag'
+    """
     raw = text.strip()
     if not raw:
-        raise SelectorError("empty selector term")
+        raise SelectorError(
+            "empty selector term. A selector is one or more terms separated by "
+            "spaces (union) or commas (intersection), e.g. '+gold.revenue' or "
+            "'ns:snowflake,name:gold.*'"
+        )
     match = _TERM.match(raw)
     if match is None:  # pragma: no cover - the pattern matches any string
         raise SelectorError(f"cannot parse selector term {text!r}")
@@ -127,7 +143,11 @@ def parse_term(text: str) -> Term:
     up_raw, down_raw = match.group("up"), match.group("down")
     body = match.group("body").strip()
     if not body:
-        raise SelectorError(f"selector term {text!r} names nothing")
+        raise SelectorError(
+            f"selector term {text!r} has modifiers but no dataset to apply them to. "
+            f"'+' means 'and everything upstream', so it needs a name after it — "
+            f"'+gold.revenue', not '+'"
+        )
 
     kind = "glob"
     for prefix in ("ns", "namespace", "name", "tag", "label"):
@@ -173,7 +193,10 @@ def parse(selector: str) -> Selection:
         if terms:
             groups.append(terms)
     if not groups:
-        raise SelectorError(f"selector {selector!r} names nothing")
+        raise SelectorError(
+            f"selector {selector!r} names nothing. Write a dataset name, a glob, or "
+            f"one of the prefixed forms: ns:, name:, tag:"
+        )
     return Selection(groups=tuple(groups))
 
 
@@ -245,7 +268,13 @@ def resolve(
             selected -= matched or set()
 
     if not selected and not allow_empty:
-        raise SelectorError(f"selector {parsed} matched no datasets in this graph")
+        raise SelectorError(
+            f"selector {parsed} matched no datasets in this graph. An empty result "
+            f"here usually means the name did not resolve rather than that nothing "
+            f"matched — check the spelling against `fathom lineage`, and remember "
+            f"that names are fully qualified ('duckdb/gold.revenue', not 'revenue'). "
+            f"`tag:` needs labels passed in; without them it matches nothing"
+        )
     return sorted(selected, key=str)
 
 

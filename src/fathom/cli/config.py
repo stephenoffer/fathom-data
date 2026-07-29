@@ -31,6 +31,7 @@ from ..core.grains import Grain
 from ..core.ids import normalize
 from ..core.paths import PathTemplate
 from ..core.types import UNPARTITIONED, DatasetId, PartitionField, PartitionSpec
+from ..core.util.text import did_you_mean
 
 __all__ = [
     "CONFIG_NAMES",
@@ -143,9 +144,13 @@ def _parse_duration(value: Any, where: str) -> timedelta | None:
 def _check_keys(blob: Mapping[str, Any], allowed: set[str], where: str) -> None:
     unknown = sorted(set(blob) - allowed)
     if unknown:
+        # Unknown keys are rejected rather than ignored: a silently dropped
+        # `partiton:` is a dataset with no partition spec, and the symptom is a
+        # planner that quietly rebuilds it whole.
+        suggestions = "".join(did_you_mean(key, allowed) for key in sorted(unknown))
         raise ConfigError(
-            f"unknown key(s) in {where}: {', '.join(unknown)}. "
-            f"Valid keys: {', '.join(sorted(allowed))}"
+            f"unknown key(s) in {where}: {', '.join(sorted(unknown))}{suggestions} "
+            f"Valid keys here: {', '.join(sorted(allowed))}"
         )
 
 
@@ -156,7 +161,13 @@ def _parse_partition(entries: Any, where: str) -> PartitionSpec:
     if isinstance(entries, str):
         entries = [entries]
     if not isinstance(entries, Sequence):
-        raise ConfigError(f"{where}: partition must be a list")
+        raise ConfigError(
+            f"{where}: `partition` must be a list of fields, in the order they "
+            f"partition the data. For example:\n"
+            f"    partition:\n"
+            f"      - {{field: dt, grain: day}}\n"
+            f"      - {{field: region}}"
+        )
 
     fields: list[PartitionField] = []
     for entry in entries:
@@ -164,10 +175,17 @@ def _parse_partition(entries: Any, where: str) -> PartitionSpec:
             fields.append(PartitionField.value(entry))
             continue
         if not isinstance(entry, Mapping):
-            raise ConfigError(f"{where}: partition entries must be strings or mappings")
+            raise ConfigError(
+                f"{where}: each partition entry is either a bare name for a value "
+                f"field (`region`) or a mapping for a time field "
+                f"(`{{field: dt, grain: day}}`), not {type(entry).__name__}"
+            )
         name = entry.get("field") or entry.get("name")
         if not name:
-            raise ConfigError(f"{where}: partition entry is missing `field`")
+            raise ConfigError(
+                f"{where}: a partition entry needs a `field` naming the column it is "
+                f"keyed on — `{{field: dt, grain: day}}`"
+            )
         grain = entry.get("grain") or entry.get("granularity")
         if grain:
             try:
@@ -324,14 +342,23 @@ def _resolve_path(root: Path, value: str) -> Path:
 def parse_config(blob: Mapping[str, Any], *, root: Path, path: Path | None = None) -> ProjectConfig:
     """Validate a config mapping. Unknown keys are errors, not warnings."""
     if not isinstance(blob, Mapping):
-        raise ConfigError("the config file must contain a mapping at the top level")
+        raise ConfigError(
+            "the config file must contain a mapping at the top level — a set of "
+            "`key: value` pairs, starting with `version: 1`. A file that parses as a "
+            "list usually has a stray leading `-`. Run `fathom init` in an empty "
+            "directory to see the expected shape."
+        )
 
     blob = _expand(dict(blob))
     _check_keys(blob, _TOP_LEVEL, "the config file")
 
     version = int(blob.get("version", 1))
     if version != 1:
-        raise ConfigError(f"config version {version} is not supported by this release")
+        raise ConfigError(
+            f"config version {version} is not supported by this release, which reads "
+            f"version 1. Either this file was written for a newer fathom, or the "
+            f"`version:` key has a typo"
+        )
 
     config = ProjectConfig(
         root=root,
@@ -347,11 +374,21 @@ def parse_config(blob: Mapping[str, Any], *, root: Path, path: Path | None = Non
     for index, entry in enumerate(blob.get("datasets") or []):
         where = f"datasets[{index}]"
         if not isinstance(entry, Mapping):
-            raise ConfigError(f"{where}: each dataset must be a mapping")
+            raise ConfigError(
+                f"{where}: each entry under `datasets` is a mapping starting with "
+                f"`name`, not a bare {type(entry).__name__}. For example:\n"
+                f"    datasets:\n"
+                f"      - name: raw.events\n"
+                f"        partition:\n"
+                f"          - {{field: dt, grain: day}}"
+            )
         _check_keys(entry, _DATASET_KEYS, where)
         name = entry.get("name")
         if not name:
-            raise ConfigError(f"{where}: missing `name`")
+            raise ConfigError(
+                f"{where}: a dataset needs a `name` — the table or path it refers to, "
+                f"resolved against the top-level `system:` key when it is not a URI"
+            )
 
         template = entry.get("template")
         sql_path = entry.get("model")
@@ -373,13 +410,24 @@ def parse_config(blob: Mapping[str, Any], *, root: Path, path: Path | None = Non
     seen: set[DatasetId] = set()
     for entry in config.datasets:
         if entry.dataset in seen:
-            raise ConfigError(f"{entry.raw_name} is declared twice; a dataset may appear only once")
+            raise ConfigError(
+                f"{entry.raw_name} is declared twice under `datasets`; a dataset may "
+                f"appear only once. Two entries for one dataset would each claim a "
+                f"partition spec, and nothing can arbitrate between them"
+            )
         seen.add(entry.dataset)
 
     for index, entry in enumerate(blob.get("lineage") or []):
         where = f"lineage[{index}]"
         if not isinstance(entry, Mapping):
-            raise ConfigError(f"{where}: each lineage source must be a mapping")
+            raise ConfigError(
+                f"{where}: each entry under `lineage` is a mapping with a `type`, not "
+                f"a bare {type(entry).__name__}. For example:\n"
+                f"    lineage:\n"
+                f"      - type: sql\n"
+                f'        paths: ["models/*.sql"]\n'
+                f"        dialect: duckdb"
+            )
         _check_keys(entry, _LINEAGE_KEYS, where)
         kind = str(entry.get("type") or "")
         if kind not in {"sql", "dbt", "openlineage", "adapter"}:
