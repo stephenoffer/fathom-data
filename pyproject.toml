@@ -65,7 +65,11 @@ packages = ["src/fathom"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q --import-mode=importlib"
+# The test tree mirrors the package tree, so `graph/test_diff.py` and
+# `govern/test_diff.py` both exist. Under the default import mode pytest names
+# modules by basename and the second one collides with the first; importlib mode
+# resolves them by path, which is what makes the mirror survive growth.
 pythonpath = ["tests", "tests/adapters/conformance"]
 
 [tool.ruff]

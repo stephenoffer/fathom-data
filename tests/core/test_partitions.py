@@ -291,3 +291,29 @@ def test_window_conversion_refuses_refinement(chain):
     if fine is coarse:
         return
     assert convert_window(0, 0, coarse, fine) is None
+
+
+# -- covered_by ----------------------------------------------------------------
+
+
+def test_covered_by_is_what_shadow_mode_grades_against():
+    """A planned `dt=ANY` legitimately covers every concrete partition under it."""
+    from fathom.core.types import ANY, KeyPredicate, covered_by
+
+    concrete = KeyPredicate.of(dt=datetime(2026, 3, 14), region="eu")
+    wide = KeyPredicate.of(dt=ANY, region="eu")
+    other = KeyPredicate.of(dt=datetime(2026, 3, 15), region="eu")
+
+    assert covered_by([wide], concrete)
+    assert covered_by([concrete, other], concrete)
+    assert not covered_by([other], concrete)
+    assert not covered_by([], concrete)
+
+
+def test_covered_by_needs_every_field_to_agree():
+    from fathom.core.types import ANY, KeyPredicate, covered_by
+
+    concrete = KeyPredicate.of(dt=datetime(2026, 3, 14), region="eu")
+    wrong_region = KeyPredicate.of(dt=ANY, region="us")
+
+    assert not covered_by([wrong_region], concrete)
