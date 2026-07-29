@@ -8,9 +8,9 @@ a vector index are datasets, so the graph already works on them. The gaps are pl
 where an asset exists that has no `DatasetId`, or a question exists that the graph
 could answer and no code asks.
 
-Entries marked **Closed** name the module that answers them. The remaining nine —
-tokenizers, multimodal assets, data mixtures, safety suites, a REST API, catalog
-write-back, orchestrator submission, ticketing, and scale — are still open.
+Entries marked **Closed** name the module that answers them. The remaining six —
+multimodal assets, a REST API, catalog write-back, orchestrator submission,
+ticketing, and scale — are still open.
 
 ---
 
@@ -66,6 +66,8 @@ and a contamination report that distinguishes "shares an ancestor" from "shares 
 
 ### 5. Tokenizers are untracked
 
+**Closed** — `ai/train/tokenizers.py`.
+
 Changing a tokenizer changes every token count, every context budget, and every
 cached embedding. It is a schema change for text, and it is invisible.
 
@@ -93,6 +95,8 @@ rollout and rollback lineage, and inference cost attribution.
 
 ### 8. Data mixtures are not decisions anyone can audit
 
+**Closed** — `ai/train/mixtures.py`.
+
 Deciding a corpus is 40% web, 30% code, 20% books, 10% math is the single highest-
 leverage choice in pretraining, and it lives in a config file nobody versions
 against outcomes.
@@ -101,6 +105,8 @@ against outcomes.
 planning that prices what changing a weight actually costs.
 
 ### 9. Safety findings do not become regressions
+
+**Closed** — `ai/quality/safety.py`.
 
 A red-team finding is fixed once and forgotten. Nothing turns it into a permanent
 test, so the same jailbreak reappears three releases later.
