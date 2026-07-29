@@ -9,6 +9,16 @@
 - **[Concepts](guide/concepts.md)** — partition mappings, the soundness invariant, and why they matter
 - **[Configuration](guide/configuration.md)** — the complete `fathom.yml` reference
 
+Then, depending on what you came for:
+
+| If you want | Read |
+|---|---|
+| a task, and the shortest thing that does it | [Cookbook](guide/cookbook.md) |
+| to use this as a library, not a CLI | [Python API tour](guide/python-api.md) |
+| to know what a word means | [Glossary](guide/glossary.md), or `fathom explain` |
+| to know why it did that | [FAQ](guide/faq.md) |
+| to fix an error you already hit | [Error messages](guide/errors.md) |
+
 ## The four verbs
 
 | Guide | Answers |
@@ -58,9 +68,22 @@ cannot: who a breach is owed to, and which columns identify nobody alone.
 
 ## Reference
 
+- **[Python API tour](guide/python-api.md)** — the package map, and the five types you hold
+- **[Cookbook](guide/cookbook.md)** — task-first recipes for the common jobs
+- **[Glossary](guide/glossary.md)** — every term the output uses in a specific sense
+- **[FAQ](guide/faq.md)** — the questions people ask in the first week
 - **[Adapters](guide/adapters.md)** — the capability matrix, and how to write a new one
 - **[Troubleshooting](guide/troubleshooting.md)** — what the warnings mean and how to fix them
+- **[Error messages](guide/errors.md)** — what this library raises, and what to do next
 - **[Architecture decisions](adr/)** — why things are the way they are
+
+Every concept in these pages is also available at the terminal, next to the message
+that raised the question:
+
+```bash
+fathom explain widening
+fathom explain               # list every topic
+```
 
 ## Examples
 

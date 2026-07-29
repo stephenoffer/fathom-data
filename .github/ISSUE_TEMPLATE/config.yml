@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question about a concept
+    url: https://github.com/stephenoffer/fathom-data/blob/main/docs/guide/glossary.md
+    about: Every term the output uses, also available as `fathom explain <topic>`.
+  - name: Why did it do that?
+    url: https://github.com/stephenoffer/fathom-data/blob/main/docs/guide/faq.md
+    about: Behaviour that surprises people but is working as intended.
+  - name: An error you already hit
+    url: https://github.com/stephenoffer/fathom-data/blob/main/docs/guide/errors.md
+    about: What each message means and what to do next.
