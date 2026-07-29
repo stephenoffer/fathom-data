@@ -4,11 +4,20 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import pytest
+
 from fathom.core.grains import Grain
 from fathom.core.ids import normalize_table
 from fathom.core.partitions import UNBOUNDED, PartitionMapping, TimeWindow
-from fathom.core.types import ANY, ColumnRef, KeyPredicate, PartitionField, PartitionSpec
-from fathom.graph import Edge, Graph
+from fathom.core.types import (
+    ANY,
+    ColumnRef,
+    DatasetId,
+    KeyPredicate,
+    PartitionField,
+    PartitionSpec,
+)
+from fathom.graph import Edge, Graph, InvalidationPlan
 
 DAY = PartitionSpec.of(PartitionField.time("dt", Grain.DAY))
 MONTH = PartitionSpec.of(PartitionField.time("dt", Grain.MONTH))
@@ -234,3 +243,146 @@ def test_a_wide_join_is_not_mistaken_for_a_cycle():
     assert plan.partitions(hub) == frozenset(
         KeyPredicate.of(dt=datetime(2026, 3, 1 + i)) for i in range(20)
     )
+
+
+# -- building a graph without ceremony -----------------------------------------
+#
+# A graph written by hand — in a test, a notebook, a bug report — is mostly string
+# literals. These cover the coercions that let it stay that way, and the orientation
+# helpers that answer "what am I looking at?" for a graph somebody else built.
+
+
+def test_datasets_and_specs_can_be_written_as_strings():
+    g = Graph()
+    g.add_dataset("duckdb/raw.events", "dt:day, region")
+    assert g.spec(DatasetId("duckdb", "raw.events")).names == ("dt", "region")
+
+
+def test_membership_accepts_a_string_and_never_raises_on_a_bad_one():
+    g = Graph()
+    g.add_dataset("duckdb/raw.events")
+    assert "duckdb/raw.events" in g
+    assert "duckdb/missing" not in g
+    assert "not a dataset id at all" not in g  # a malformed string is absent, not an error
+
+
+def test_a_graph_reports_its_size_and_iterates_in_a_stable_order():
+    g = Graph()
+    g.add_dataset("duckdb/b")
+    g.add_dataset("duckdb/a")
+    assert len(g) == 2
+    assert [str(ds) for ds in g] == ["duckdb/a", "duckdb/b"]
+    assert repr(g) == "<Graph 2 datasets, 0 edges>"
+
+
+def test_connect_registers_both_ends_and_returns_the_edge():
+    g = Graph()
+    edge = g.connect("duckdb/a", "duckdb/b", evidence="sql")
+    assert len(g) == 2
+    assert g.out_edges(DatasetId("duckdb", "a")) == [edge]
+    assert g.in_edges(DatasetId("duckdb", "b")) == [edge]
+
+
+def test_connect_defaults_to_unbounded_rather_than_guessing_a_rollup():
+    """A daily source feeding a monthly table usually means a rollup. Usually is not
+    a basis for deciding what not to rebuild."""
+    g = Graph()
+    edge = g.connect("duckdb/a", "duckdb/b", src_spec="dt:day", dst_spec="dt:month")
+    assert edge.mapping.is_unbounded
+
+
+def test_a_conflicting_spec_says_what_to_do_about_it():
+    g = Graph()
+    g.add_dataset("duckdb/a", "dt:day")
+    with pytest.raises(ValueError) as exc:
+        g.add_dataset("duckdb/a", "dt:month")
+    message = str(exc.value)
+    assert "dt:day" in message and "dt:month" in message
+    assert "fathom.yml" in message
+
+
+def test_describe_names_what_makes_a_plan_coarse():
+    g = Graph()
+    g.add_dataset("duckdb/raw", "dt:day")
+    g.add_dataset("duckdb/gold")  # no spec: only ever rebuilt whole
+    g.connect("duckdb/raw", "duckdb/gold", evidence="sql")  # unbounded mapping
+    described = g.describe()
+    assert "1/2 datasets have a partition spec" in described
+    assert "0/1 edges carry a provable mapping" in described
+    assert "duckdb/raw" in described  # the one source nothing feeds
+
+
+def test_an_edge_explains_what_it_claims():
+    edge = Edge(
+        DatasetId("duckdb", "a"),
+        DatasetId("duckdb", "b"),
+        PartitionMapping.of(dt=TimeWindow.trailing("dt", 7, "day")),
+        columns=(("amount", "revenue"),),
+        evidence="sql",
+    )
+    explained = edge.explain()
+    assert "learned from sql" in explained
+    assert "amount -> revenue" in explained
+    assert "the 6 days after it" in explained
+
+
+def test_an_edge_without_columns_says_what_that_costs():
+    edge = Edge(DatasetId("duckdb", "a"), DatasetId("duckdb", "b"), PartitionMapping())
+    assert "attributes to the dataset" in edge.explain()
+
+
+# -- reading a plan ------------------------------------------------------------
+
+
+def _rollup_plan() -> InvalidationPlan:
+    daily, monthly = PartitionSpec.parse("dt:day"), PartitionSpec.parse("dt:month")
+    g = Graph()
+    g.connect(
+        "duckdb/raw",
+        "duckdb/gold",
+        evidence="sql",
+        src_spec=daily,
+        dst_spec=monthly,
+        mapping=PartitionMapping.rollup(daily, monthly),
+    )
+    return g.invalidate({DatasetId("duckdb", "raw"): [KeyPredicate.of(dt=datetime(2026, 3, 14))]})
+
+
+def test_a_plan_is_a_sequence_of_datasets_in_build_order():
+    plan = _rollup_plan()
+    assert [str(ds) for ds in plan] == ["duckdb/raw", "duckdb/gold"]
+    assert len(plan) == 2
+    assert DatasetId("duckdb", "gold") in plan
+
+
+def test_an_empty_plan_is_falsy_and_a_populated_one_is_not():
+    assert not Graph().invalidate({})
+    assert _rollup_plan()
+
+
+def test_a_plan_counts_the_partitions_it_would_rebuild():
+    assert _rollup_plan().total_partitions == 2  # one day, one month
+
+
+def test_a_plan_says_why_a_dataset_is_in_it():
+    plan = _rollup_plan()
+    assert plan.why(DatasetId("duckdb", "raw")) == ["seed: reported changed at source"]
+    assert "via duckdb/raw" in plan.why(DatasetId("duckdb", "gold"))[0]
+
+
+def test_explaining_a_dataset_covers_partitions_and_cause():
+    explained = _rollup_plan().explain(DatasetId("duckdb", "gold"))
+    assert "1 partition(s) to rebuild" in explained
+    assert "dt=2026-03-01T00:00:00" in explained
+    assert "because:" in explained
+
+
+def test_explaining_an_unaffected_dataset_says_so_rather_than_raising():
+    assert "not in this plan" in _rollup_plan().explain(DatasetId("duckdb", "elsewhere"))
+
+
+def test_a_widened_dataset_is_flagged_in_its_explanation():
+    g = Graph()
+    g.connect("duckdb/raw", "duckdb/gold", evidence="sql", src_spec="dt:day", dst_spec="dt:day")
+    plan = g.invalidate({DatasetId("duckdb", "raw"): [KeyPredicate.of(dt=datetime(2026, 3, 14))]})
+    assert "widened to the whole dataset" in plan.explain(DatasetId("duckdb", "gold"))

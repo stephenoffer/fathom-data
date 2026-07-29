@@ -3,6 +3,10 @@
 Ten minutes to a working project. We will build a dependency graph, ask what one
 day of new data invalidates, and find out why the answer is sometimes "everything".
 
+If terms like *partition*, *grain*, or *partition mapping* are new, read
+[What fathom is](what-is-fathom.md) first — it is five minutes and defines all of
+them.
+
 ## Install
 
 ```bash

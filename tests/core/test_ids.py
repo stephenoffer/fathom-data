@@ -89,7 +89,7 @@ def test_uri_wins_over_table_interpretation():
 
 
 def test_bare_name_without_system_is_an_error():
-    with pytest.raises(ValueError, match="pass system="):
+    with pytest.raises(ValueError, match="Pass `system=`"):
         normalize("orders")
 
 
@@ -156,3 +156,43 @@ def test_dataset_uri_refuses_a_catalog_dataset():
 
 def test_dataset_uri_of_a_bare_bucket():
     assert dataset_uri(normalize_path("s3://lake")) == "s3://lake"
+
+
+# -- the alias registry as a collection ----------------------------------------
+
+
+def test_an_alias_registry_reports_what_it_holds():
+    registry = AliasRegistry()
+    hive = DatasetId("hive", "raw.events")
+    stored = DatasetId("s3://lake", "raw/events")
+    registry.alias(hive, stored)
+
+    assert hive in registry
+    assert stored not in registry  # the canonical side is not itself an alias
+    assert registry.items() == [(hive, stored)]
+
+
+def test_aliasing_an_identity_to_itself_is_a_no_op():
+    """Callers loop over declarations; making them filter this is busywork."""
+    registry = AliasRegistry()
+    same = DatasetId("hive", "raw.events")
+    registry.alias(same, same)
+    assert len(registry) == 0
+
+
+def test_a_cycle_says_which_declaration_to_drop():
+    registry = AliasRegistry()
+    a, b = DatasetId("hive", "a"), DatasetId("hive", "b")
+    registry.alias(a, b)
+    with pytest.raises(ValueError) as exc:
+        registry.alias(b, a)
+    assert "would form a cycle" in str(exc.value)
+    assert "canonical identity" in str(exc.value)
+
+
+def test_a_catalog_dataset_says_how_to_reach_it_instead():
+    with pytest.raises(ValueError) as exc:
+        dataset_uri(DatasetId("snowflake://xy12345", "db.schema.orders"))
+    message = str(exc.value)
+    assert "engine adapter" in message
+    assert "alias" in message

@@ -102,7 +102,13 @@ def test_a_single_bucket_span_has_one_entry():
 
 
 def test_absurd_spans_are_refused_rather_than_hanging():
-    with pytest.raises(ValueError, match="too large"):
+    with pytest.raises(ValueError, match="exceeds 100,000 buckets"):
+        span(datetime(1000, 1, 1), datetime(3000, 1, 1), Grain.HOUR)
+
+
+def test_the_refusal_says_how_to_fix_it():
+    """A ceiling nobody can act on just moves the confusion one step later."""
+    with pytest.raises(ValueError, match="coarser grain"):
         span(datetime(1000, 1, 1), datetime(3000, 1, 1), Grain.HOUR)
 
 

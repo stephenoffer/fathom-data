@@ -2,6 +2,9 @@
 
 ## Start here
 
+- **[What fathom is](guide/what-is-fathom.md)** — the problem it solves, in plain
+  terms, plus the six words the rest of these docs assume. Read this first if you
+  have not used a lineage tool before.
 - **[Getting started](guide/getting-started.md)** — a working project in ten minutes
 - **[Concepts](guide/concepts.md)** — partition mappings, the soundness invariant, and why they matter
 - **[Configuration](guide/configuration.md)** — the complete `fathom.yml` reference
@@ -64,7 +67,9 @@ cannot: who a breach is owed to, and which columns identify nobody alone.
 Runnable projects live in [`examples/`](../examples/). Each is self-contained and
 tested in CI, so they cannot rot:
 
-- `01-local-lakehouse` — the whole loop on local Parquet
-- `02-shadow-mode` — proving the planner before trusting it
-- `03-dbt-project` — building a graph from a dbt manifest
-- `04-erasure` — locating and destroying a subject's data
+- [`01_local_lakehouse.py`](../examples/01_local_lakehouse.py) — the whole loop on local Parquet
+- [`02_shadow_mode.py`](../examples/02_shadow_mode.py) — proving the planner before trusting it
+- [`03_dbt_project.py`](../examples/03_dbt_project.py) — building a graph from a dbt manifest
+- [`04_erasure.py`](../examples/04_erasure.py) — locating and destroying a subject's data
+- [`05_cloud_storage.py`](../examples/05_cloud_storage.py) — Delta on object storage
+- [`06_worth_keeping.py`](../examples/06_worth_keeping.py) — what never arrived, who reads it, what it cost

@@ -325,9 +325,20 @@ clear result says "no risk proven", never "safe".
 
 ### P36 — Refactoring a pipeline silently changes its output
 **Who feels it** The reviewer who approved it.
-**fathom** Shadow mode compares fingerprints between the incremental and full paths.
-**Status** Partial — shadow mode compares plan decisions, not the outputs of a
-refactored transform against its predecessor.
+**Today** `diff` compares the graph, and the graph is identical. `drift` compares
+against yesterday, and yesterday is now the new version. Shadow mode compares the
+planner's *decisions*. Nobody has the one comparison that matters: this build against
+the build the old code would have produced.
+**fathom** `observe.regression.compare_outputs` compares fingerprints partition by
+partition, and `explain` turns a digest mismatch into row counts, null rates, and
+ranges — a digest difference alone is the least actionable finding a review can get.
+**Status** Solved, with two refusals. It reports **changed**, never *wrong*: a refactor
+that fixes a bug is supposed to change the output, and deciding which is which is not
+the tool's call — `intended` lets a reviewer accept changes, and accepted ones are
+counted rather than hidden. And a clean result is refused below a coverage floor,
+because comparing three partitions out of four hundred proves nothing about the rest.
+`is_regression` is deliberately not the negation of `is_clean`: an inconclusive report
+is neither.
 
 ---
 
@@ -906,8 +917,8 @@ fraction of a budget this library cannot see.
 
 Nine entries above are `Gap` or a `Partial` with real substance behind it. Grouped:
 
-**Closed since this catalog was written** — P8, P10, P32, P33, P34, P35, P42, P56,
-P78, P124, P126, P127 and P128 moved to `Solved`, and P64 to a `Partial` that states exactly what it can and
+**Closed since this catalog was written** — P8, P10, P32, P33, P34, P35, P36, P42,
+P56, P78, P124, P126, P127 and P128 moved to `Solved`, and P64 to a `Partial` that states exactly what it can and
 cannot prove. Eight new modules, ten renderers, three persisted event streams, four CLI
 commands, 284 tests. See [improvements.md](improvements.md).
 

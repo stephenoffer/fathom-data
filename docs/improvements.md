@@ -4,23 +4,23 @@ What was done about the `Gap` and weak `Partial` entries in
 [problems.md](problems.md). Each section names the problems it closes, so the two
 documents stay in step.
 
-Twelve modules — **165 public entry points** — plus eleven renderers, sixteen store
+Thirteen modules — **176 public entry points** — plus eleven renderers, sixteen store
 methods over three schema migrations, nine CLI commands, two config blocks, six
 `doctor` checks, an emit facet, three orchestrator generators, four guides, and a
 runnable example.
 
-**581 tests**, of which 53 are property tests over generated inputs. The suite went
-852 → 1627.
+**614 tests**, of which 53 are property tests over generated inputs. The suite went
+852 → 1763.
 
 | | |
 |---|---|
-| Public entry points (12 modules) | 165 |
+| Public entry points (13 modules) | 176 |
 | Renderers, store methods, CLI commands | 36 |
 | Config keys, `doctor` checks, emit facet, generators | 20 |
 | Fixes to pre-existing code | 4 |
-| **New behaviours** | **225** |
-| **Tests, each pinning one** | **581** |
-| **Total** | **806** |
+| **New behaviours** | **236** |
+| **Tests, each pinning one** | **614** |
+| **Total** | **850** |
 
 Every one exists because the catalog said the problem was real and the library could
 not answer it.
@@ -293,6 +293,32 @@ maintained by its own pipeline looked read. Rather than pick a default,
 site, and both docstrings name the trap.
 
 ---
+
+## `observe.regression` — P36
+
+Did the rewrite change the numbers?
+
+Someone tunes a query, migrates an engine, folds three CTEs into one. The pipeline
+succeeds, the tests pass, and the output is subtly different. `diff` compares the graph
+and the graph is identical. `drift` compares against yesterday and yesterday is now the
+new version. Shadow mode compares the planner's decisions. The one comparison nobody
+had is this build against the build the old code would have produced.
+
+- `compare_outputs` compares fingerprints per partition; `explain` turns a digest
+  mismatch into row counts, null rates, and ranges, because a digest difference alone
+  is the least actionable finding a review can receive
+- it reports **changed**, never *wrong*. A refactor that fixes a bug is supposed to
+  change the output; a tool deciding for itself which differences were bugs would be
+  wrong in both directions, and the expensive direction is silence
+- `intended` accepts reviewed changes, and accepted ones are **counted, not hidden** —
+  a review that cannot see how many were waved through is not a review
+- a clean result is refused below a coverage floor. Comparing three partitions out of
+  four hundred and reporting "no changes" is the failure the module exists to avoid
+- `is_regression` is deliberately not the negation of `is_clean`: an inconclusive
+  report is neither a pass nor a block, and collapsing them lets a refactor through on
+  the strength of having compared almost nothing
+- a partition on one side only is not a content change, so an unbuilt slice never reads
+  as a table that shrank
 
 ## `graph.plan.billing` — P8
 

@@ -31,6 +31,7 @@ from ..core.types import (
     LineageSource,
     PartitionSpec,
 )
+from ..core.util.text import did_you_mean
 
 __all__ = [
     "CatalogAdapter",
@@ -202,7 +203,13 @@ def get_adapter(name: str) -> type:
     cause is a typo or a missing optional dependency whose import never ran.
     """
     if name not in _REGISTRY:
-        raise KeyError(f"no adapter named {name!r}; registered: {sorted(_REGISTRY)}")
+        raise KeyError(
+            f"no adapter named {name!r}{did_you_mean(name, _REGISTRY)}; "
+            f"registered right now: {sorted(_REGISTRY)}. An adapter behind an "
+            f"optional extra stays absent until its package is installed — "
+            f"iceberg needs `pip install 'fathom-data[iceberg]'`, cloud storage "
+            f"needs `[s3]`, `[gcs]`, or `[azure]`"
+        )
     return _REGISTRY[name]
 
 

@@ -6,6 +6,7 @@
     seasonal      the same, bucketed by a cycle, for data that knows Tuesday from Sunday
     completeness  whether the partitions that should exist actually do
     joins         join keys, and the two ways one quietly ruins a table
+    regression    did the rewrite change the numbers, and by how much
     usage         who reads a dataset, and what follows from nobody reading it
     shadow        the planner graded against a full rebuild, publishing its own misses
     freshness     transitive age — a table is only as fresh as its oldest input
@@ -27,6 +28,7 @@ from . import (
     joins,
     profile,
     quality,
+    regression,
     schema,
     seasonal,
     shadow,
@@ -39,6 +41,7 @@ __all__ = [
     "joins",
     "profile",
     "quality",
+    "regression",
     "schema",
     "seasonal",
     "shadow",

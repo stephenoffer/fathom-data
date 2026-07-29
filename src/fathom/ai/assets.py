@@ -54,6 +54,15 @@ __all__ = [
     "is_vector_index",
     "kind_of",
     "model",
+    "media_corpus",
+    "safety_suite",
+    "deployment",
+    "annotation_set",
+    "preference_set",
+    "mixture",
+    "tokenizer",
+    "sweep",
+    "run",
     "prompt",
     "spec_for",
     "tool",
@@ -76,6 +85,17 @@ class AssetKind(StrEnum):
     CORPUS = "corpus"
     AGENT = "agent"
     TOOL = "tool"
+    # Added as the package grew past "what was trained" into "how, and what happened
+    # next". Each denotes something with its own inputs, versions, and obligations.
+    RUN = "run"  # one training or evaluation execution
+    SWEEP = "sweep"  # a set of runs varying hyperparameters
+    TOKENIZER = "tokenizer"  # a vocabulary; changing it is a schema change for text
+    MIXTURE = "mixture"  # corpus sampling weights
+    PREFERENCE_SET = "preference"  # ranked pairs for DPO/RLHF
+    ANNOTATION = "annotation"  # human labels, with annotator provenance
+    DEPLOYMENT = "deployment"  # a served endpoint, downstream of a model
+    SAFETY_SUITE = "safety"  # red-team findings turned into regressions
+    MEDIA = "media"  # image, audio, and video corpora
 
 
 # Scheme reserved per kind. Kept explicit rather than derived from the enum value so
@@ -92,6 +112,15 @@ _SCHEMES: dict[AssetKind, str] = {
     AssetKind.CORPUS: "corpus",
     AssetKind.AGENT: "agent",
     AssetKind.TOOL: "tool",
+    AssetKind.RUN: "run",
+    AssetKind.SWEEP: "sweep",
+    AssetKind.TOKENIZER: "tokenizer",
+    AssetKind.MIXTURE: "mixture",
+    AssetKind.PREFERENCE_SET: "preference",
+    AssetKind.ANNOTATION: "annotation",
+    AssetKind.DEPLOYMENT: "deployment",
+    AssetKind.SAFETY_SUITE: "safety",
+    AssetKind.MEDIA: "media",
 }
 
 _BY_SCHEME = {scheme: kind for kind, scheme in _SCHEMES.items()}
@@ -118,6 +147,56 @@ def model(name: str, *, registry: str = "local") -> DatasetId:
 def checkpoint(name: str, *, registry: str = "local") -> DatasetId:
     """One saved state of a training run, distinct from the model it eventually becomes."""
     return _identity(AssetKind.CHECKPOINT, name, registry)
+
+
+def run(name: str, *, tracker: str = "local") -> DatasetId:
+    """One training or evaluation execution. ``run("pretrain/2026-07-14/a3f")``.
+
+    Distinct from the checkpoint it writes and the model it becomes: a run has
+    hyperparameters, a status, and a comparison to the run before it, none of which
+    belong to the artefact it produced.
+    """
+    return _identity(AssetKind.RUN, name, tracker)
+
+
+def sweep(name: str, *, tracker: str = "local") -> DatasetId:
+    """A set of runs varying hyperparameters, and the thing a trial belongs to."""
+    return _identity(AssetKind.SWEEP, name, tracker)
+
+
+def tokenizer(name: str, *, registry: str = "local") -> DatasetId:
+    """A vocabulary. Changing one is a schema change for every text asset downstream."""
+    return _identity(AssetKind.TOKENIZER, name, registry)
+
+
+def mixture(name: str, *, registry: str = "local") -> DatasetId:
+    """Corpus sampling weights — the highest-leverage pretraining decision there is."""
+    return _identity(AssetKind.MIXTURE, name, registry)
+
+
+def preference_set(name: str, *, store: str = "local") -> DatasetId:
+    """Ranked pairs for DPO or RLHF, downstream of the annotations that produced them."""
+    return _identity(AssetKind.PREFERENCE_SET, name, store)
+
+
+def annotation_set(name: str, *, store: str = "local") -> DatasetId:
+    """Human labels, carrying annotator provenance and therefore consent obligations."""
+    return _identity(AssetKind.ANNOTATION, name, store)
+
+
+def deployment(name: str, *, environment: str = "prod") -> DatasetId:
+    """A served endpoint. Downstream of a model, and where users actually meet it."""
+    return _identity(AssetKind.DEPLOYMENT, name, environment)
+
+
+def safety_suite(name: str, *, registry: str = "local") -> DatasetId:
+    """Red-team findings turned into a regression suite rather than a closed ticket."""
+    return _identity(AssetKind.SAFETY_SUITE, name, registry)
+
+
+def media_corpus(name: str, *, store: str = "local") -> DatasetId:
+    """An image, audio, or video corpus. Partitioned, drifting, and full of people."""
+    return _identity(AssetKind.MEDIA, name, store)
 
 
 def adapter(name: str, *, registry: str = "local") -> DatasetId:

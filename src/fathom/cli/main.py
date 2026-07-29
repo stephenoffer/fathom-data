@@ -21,10 +21,11 @@ from typing import Any
 import click
 
 from .. import __version__
-from ..adapters import registered
+from ..adapters import get_adapter, registered
 from ..core.errors import ConfigError
 from ..core.types import UNPARTITIONED, DatasetId, KeyPredicate
 from ..core.util.clock import as_utc, now
+from ..core.util.text import did_you_mean
 from ..govern import contracts as contracts_mod
 from ..govern import reidentification as reid
 from ..govern.erasure import ErasureRequest, apply_erasure
@@ -38,6 +39,7 @@ from ..observe import usage as usage_mod
 from ..observe.profile import Severity, summarize
 from ..report import orchestrators, render
 from ..store.sqlite import Store
+from . import explain as explain_topics
 from .config import CONFIG_NAMES, load_config
 from .project import Project
 
@@ -93,18 +95,16 @@ def _project(ctx: click.Context) -> Project:
 
 
 def _parse_bindings(binding: str, spec: Any) -> KeyPredicate:
-    pairs: list[tuple[str, object]] = []
-    for chunk in filter(None, binding.split(",")):
-        key, _, raw = chunk.partition("=")
-        field = spec.field(key) if spec is not None else None
-        if field is not None and field.kind == "time":
-            try:
-                pairs.append((key, datetime.fromisoformat(raw)))
-            except ValueError as exc:
-                raise click.BadParameter(f"{raw!r} is not an ISO datetime") from exc
-        else:
-            pairs.append((key, raw))
-    return KeyPredicate(bindings=tuple(pairs))
+    """Parse `FIELD=VALUE,FIELD=VALUE` against a spec, as a click parameter would.
+
+    Delegates to `KeyPredicate.parse` so the CLI syntax and the Python one cannot
+    drift, and re-raises as `BadParameter` so click prints usage rather than a
+    traceback.
+    """
+    try:
+        return KeyPredicate.parse(binding, spec)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc)) from exc
 
 
 def _narrow(graph: Any, selector: str | None) -> Any:
@@ -129,20 +129,104 @@ def _seeds(project: Project, dirties: tuple[str, ...]) -> dict[DatasetId, list[K
         if dataset not in known:
             # Almost always a typo, and otherwise it produces a confident-looking
             # plan containing only the misspelled name.
-            click.echo(f"  ! {dataset} is not in the graph; check the name", err=True)
+            suggestion = did_you_mean(str(dataset), [str(d) for d in known])
+            click.echo(
+                f"  ! {dataset} is not in the graph, so nothing will propagate from it"
+                f"{suggestion or '. Run `fathom lineage` to see what is'}",
+                err=True,
+            )
         out.setdefault(dataset, []).append(
             _parse_bindings(binding, graph.spec(dataset) or UNPARTITIONED)
         )
     return out
 
 
-@click.group(context_settings={"help_option_names": ["-h", "--help"]})
+class _Sections(click.Group):
+    """A group that lists its commands by what they are for, not alphabetically.
+
+    Twenty-odd commands in one flat alphabetical list tells a new reader nothing
+    about where to start. Grouped by stage, the list is itself the walkthrough:
+    set up, learn the graph, plan against it, then everything that reads it.
+    """
+
+    #: Section title -> commands, in the order a project actually uses them.
+    SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("Start here", ("init", "doctor", "explain", "adapters")),
+        ("Build the graph", ("ingest", "lineage", "history")),
+        ("Plan a rebuild", ("detect", "plan", "dag", "shadow")),
+        ("Watch the data", ("profile", "check", "completeness", "seasonal")),
+        ("Govern it", ("label", "erase", "risk", "contracts")),
+        ("Justify it", ("usage", "value", "impact")),
+    )
+
+    def format_commands(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        listed: set[str] = set()
+        for title, names in self.SECTIONS:
+            rows = []
+            for name in names:
+                command = self.get_command(ctx, name)
+                if command is None or command.hidden:
+                    continue
+                listed.add(name)
+                rows.append((name, command.get_short_help_str(limit=68)))
+            if rows:
+                with formatter.section(title):
+                    formatter.write_dl(rows)
+
+        # Anything added later still appears, so a new command cannot go missing
+        # just because nobody remembered to put it in a section.
+        rest = [
+            (name, cmd.get_short_help_str(limit=68))
+            for name in sorted(self.list_commands(ctx))
+            if name not in listed and (cmd := self.get_command(ctx, name)) and not cmd.hidden
+        ]
+        if rest:
+            with formatter.section("Other"):
+                formatter.write_dl(rest)
+
+    def resolve_command(
+        self, ctx: click.Context, args: list[str]
+    ) -> tuple[str | None, click.Command | None, list[str]]:
+        """Suggest the nearest command before giving up on an unknown one."""
+        name = args[0] if args else ""
+        if name and self.get_command(ctx, name) is None:
+            suggestion = did_you_mean(name, self.list_commands(ctx))
+            if suggestion:
+                ctx.fail(f"no such command {name!r}{suggestion}")
+        return super().resolve_command(ctx, args)
+
+
+@click.group(cls=_Sections, context_settings={"help_option_names": ["-h", "--help"]})
 @click.version_option(__version__, prog_name="fathom")
 @click.option("--config", type=click.Path(), envvar="FATHOM_CONFIG", help="Path to fathom.yml.")
 @click.option("--store", type=click.Path(), envvar="FATHOM_STORE", help="Override the store path.")
 @click.pass_context
 def main(ctx: click.Context, config: str | None, store: str | None) -> None:
-    """Lineage, partition-scoped invalidation, profiling, and policy for data platforms."""
+    """Lineage, partition-scoped invalidation, profiling, and policy for data platforms.
+
+    Nothing here writes to your data. `plan` prints what it would rebuild and `erase`
+    prints what it would destroy; applying either needs an engine binding you supply
+    deliberately, from a pipeline rather than a shell.
+
+    \b
+    First time here:
+      fathom init          write a starter fathom.yml, then edit the datasets block
+      fathom ingest        build the dependency graph from your SQL or dbt manifest
+      fathom doctor        find what would silently make plans worse
+      fathom plan --detect see what a source change would invalidate
+
+    \b
+    Stuck on a word? Every term in a warning has an entry:
+      fathom explain widening
+      fathom explain               list every topic
+
+    \b
+    Exit codes:
+      0  success, and nothing needed your attention
+      1  a check failed — drift, a policy violation, a breached contract, an
+         incomplete erasure, or a missed partition in shadow mode
+      2  the command was used wrongly, or the config could not be read
+    """
     ctx.ensure_object(dict)
     ctx.obj["config"] = config
     ctx.obj["store"] = store
@@ -152,33 +236,116 @@ def main(ctx: click.Context, config: str | None, store: str | None) -> None:
 
 
 @main.command()
-@click.option("--force", is_flag=True, help="Overwrite an existing config.")
-def init(force: bool) -> None:
-    """Write a starter fathom.yml in the current directory."""
-    target = Path(CONFIG_NAMES[0])
-    if target.exists() and not force:
-        raise click.ClickException(f"{target} already exists; pass --force to overwrite")
-    target.write_text(STARTER_CONFIG)
-    click.echo(f"wrote {target}")
-    click.echo("Next: edit the datasets block, then run `fathom ingest`.")
+@click.argument("topic", required=False)
+def explain(topic: str | None) -> None:
+    """Explain a concept this tool's output assumes you know.
+
+    \b
+    Examples:
+      fathom explain                list every topic
+      fathom explain widening       why a plan rebuilt more than expected
+      fathom explain unbounded      what an unbounded mapping costs
+      fathom explain shadow-mode    how to decide whether to trust the planner
+    """
+    if not topic:
+        click.echo("Topics — pass one to `fathom explain`:\n")
+        width = max(len(name) for name in explain_topics.titles())
+        for name in explain_topics.titles():
+            click.echo(f"  {name:<{width}}  {explain_topics.TOPICS[name].gloss}")
+        click.echo("\nFull guides live in docs/. Start with docs/guide/concepts.md.")
+        return
+
+    found = explain_topics.lookup(topic)
+    if found is None:
+        raise click.ClickException(
+            f"no topic {topic!r}"
+            f"{did_you_mean(topic, explain_topics.titles())}"
+            f"\nRun `fathom explain` with no argument to list them."
+        )
+    click.echo(found.render())
 
 
 @main.command()
-def adapters() -> None:
-    """List registered adapters."""
-    for name in registered():
+@click.option("--force", is_flag=True, help="Overwrite an existing config.")
+def init(force: bool) -> None:
+    """Write a starter fathom.yml in the current directory.
+
+    \b
+    Example:
+      fathom init
+      fathom init --force    replace an existing config
+    """
+    target = Path(CONFIG_NAMES[0])
+    if target.exists() and not force:
+        raise click.ClickException(
+            f"{target} already exists. Pass --force to overwrite it, or edit it in "
+            f"place — `fathom doctor` will tell you what it is still missing."
+        )
+    target.write_text(STARTER_CONFIG)
+    click.echo(f"wrote {target}")
+    click.echo("")
+    click.echo("Next, in order:")
+    click.echo("  1. Edit the `datasets` block — name your tables and how each is")
+    click.echo("     partitioned. This is the declaration that makes plans precise.")
+    click.echo("  2. Point the `lineage` block at your SQL or dbt manifest.")
+    click.echo("  3. `fathom ingest`   build the graph")
+    click.echo("  4. `fathom doctor`   check for what would silently make plans worse")
+    click.echo("")
+    click.echo("Commit fathom.yml. Do not commit the store — it rebuilds, and it conflicts.")
+
+
+@main.command()
+@click.option("--verbose", "-v", is_flag=True, help="Explain what each capability means.")
+def adapters(verbose: bool) -> None:
+    """List registered adapters, and what each can actually do.
+
+    Adapters declare capabilities rather than implement everything. Most surprises
+    about a plan are a declared limit showing through, so this is worth reading
+    before concluding the planner is being conservative for no reason.
+
+    \b
+    Example:
+      fathom adapters
+      fathom adapters --verbose
+    """
+    names = registered()
+    if not names:
+        raise click.ClickException("no adapters registered; this is a broken installation")
+    for name in names:
+        if not verbose:
+            click.echo(name)
+            continue
         click.echo(name)
+        caps = getattr(get_adapter(name), "capabilities", None)
+        if caps is None:
+            click.echo("  capabilities are declared per instance, not per class")
+        else:
+            for line in caps.explain():
+                click.echo(f"  {line}")
+        click.echo("")
 
 
 @main.command()
 @click.pass_context
 def doctor(ctx: click.Context) -> None:
-    """Report configuration problems that would silently degrade a plan."""
+    """Report configuration problems that would silently degrade a plan.
+
+    Everything here is a thing that makes plans coarser without making them fail,
+    which is the failure mode worth checking for: a tool that quietly rebuilds more
+    than it needs to looks like it is working.
+
+    \b
+    Example:
+      fathom doctor
+    """
     with _project(ctx) as project:
         click.echo(f"config   {project.config.path}")
         click.echo(f"store    {project.store.path}")
         click.echo(f"system   {project.config.system}")
         click.echo(f"datasets {len(project.config.datasets)}, edges {len(project.graph().edges)}")
+
+        click.echo("")
+        click.echo(project.graph().describe())
 
         problems = project.doctor()
         if not problems:
@@ -187,6 +354,11 @@ def doctor(ctx: click.Context) -> None:
         click.echo(f"\n{len(problems)} problem(s):")
         for problem in problems:
             click.echo(f"  {problem}")
+        click.echo("")
+        click.echo(
+            "Each of these makes plans coarser without making them fail. "
+            "`fathom explain widening` covers what that costs."
+        )
 
 
 # -- graph ---------------------------------------------------------------------
@@ -197,7 +369,16 @@ def doctor(ctx: click.Context) -> None:
 @click.option("--note", default="", help="Why the graph changed, for the history.")
 @click.pass_context
 def ingest(ctx: click.Context, author: str, note: str) -> None:
-    """Build the dependency graph from every configured lineage source."""
+    """Build the dependency graph from every configured lineage source.
+
+    Re-run this whenever the pipeline changes. Each run records a revision, so
+    `fathom history` can later answer who narrowed an edge and when.
+
+    \b
+    Example:
+      fathom ingest
+      fathom ingest --author "$USER" --note "added the fx_rates join"
+    """
     with _project(ctx) as project:
         result = project.ingest(author=author, note=note)
         click.echo(result.summary())
@@ -207,21 +388,55 @@ def ingest(ctx: click.Context, author: str, note: str) -> None:
             click.echo(f"  ! ... and {len(result.notes) - 20} more", err=True)
         if not result.edges:
             raise click.ClickException(
-                "no lineage extracted; check the `lineage` block in your config"
+                "no lineage extracted from any configured source. Check the `lineage` "
+                "block in your config: `paths` must match real files, and a `dialect` "
+                "the parser does not know reads as zero edges rather than as an error. "
+                "`fathom doctor` reports which sources were reachable."
             )
+        click.echo("")
+        click.echo("Next: `fathom doctor` for what would make plans coarse, then")
+        click.echo("      `fathom plan --detect` to see what a source change invalidates.")
 
 
 @main.command()
 @click.option("--select", "selector", help="Restrict to a selector, e.g. '+gold.monthly+'.")
+@click.option(
+    "--explain", "as_prose", is_flag=True, help="Say what each edge claims, in sentences."
+)
 @click.pass_context
-def lineage(ctx: click.Context, selector: str | None) -> None:
-    """Show the stored dependency graph."""
+def lineage(ctx: click.Context, selector: str | None, as_prose: bool) -> None:
+    """Show the stored dependency graph.
+
+    Each line is `source -> target {mapping} [evidence]`. The mapping is the part
+    nobody can verify by reading the SQL, so `--explain` spells it out.
+
+    \b
+    Examples:
+      fathom lineage
+      fathom lineage --select '+gold.monthly+'    that model and both directions
+      fathom lineage --select tag:pii             everything carrying a tag
+      fathom lineage --explain                    what each edge actually claims
+
+    Selector syntax is dbt's — `fathom explain selector` covers it.
+    """
     with _project(ctx) as project:
         graph = project.graph()
         if not graph.edges:
-            raise click.ClickException("no lineage in the store; run `fathom ingest` first")
+            raise click.ClickException(
+                "no lineage in the store yet; run `fathom ingest` first to build the graph"
+            )
         graph = _narrow(graph, selector)
+        if not graph.edges:
+            raise click.ClickException(
+                f"the selector {selector!r} matched no edges. An empty result usually "
+                f"means the name did not resolve rather than that nothing matched — "
+                f"run `fathom lineage` unfiltered to see what is there."
+            )
         for edge in graph.edges:
+            if as_prose:
+                click.echo(edge.explain())
+                click.echo("")
+                continue
             click.echo(str(edge))
             for src_col, dst_col in edge.columns:
                 click.echo(f"    {src_col} -> {dst_col}")
@@ -230,10 +445,24 @@ def lineage(ctx: click.Context, selector: str | None) -> None:
 @main.command()
 @click.pass_context
 def detect(ctx: click.Context) -> None:
-    """Ask every configured source what changed since the last run."""
+    """Ask every configured source what changed since the last run.
+
+    Advances a resume token per source, so two runs in a row report the second as
+    empty. That is the point — it is the seed for `fathom plan --detect`, not a
+    listing of what exists.
+
+    \b
+    Example:
+      fathom detect
+    """
     with _project(ctx) as project:
         if not project.config.sources:
-            raise click.ClickException("no sources configured; add them under `datasets`")
+            raise click.ClickException(
+                "no sources configured, so there is nothing to ask what changed. Add a "
+                "`source:` to entries in the `datasets` block of fathom.yml — a dataset "
+                "with a partition spec but no source can still be planned against, it "
+                "just cannot seed a plan by itself."
+            )
         for dataset, changes in project.detect().items():
             click.echo(f"{dataset}  token={changes.token or '-'}")
             if not changes.complete:
@@ -248,17 +477,61 @@ def detect(ctx: click.Context) -> None:
 
 
 @main.command()
-@click.option("--dirty", "dirties", multiple=True, help="TABLE@FIELD=VALUE[,FIELD=VALUE].")
+@click.option(
+    "--dirty",
+    "dirties",
+    multiple=True,
+    help="What changed: TABLE@FIELD=VALUE[,FIELD=VALUE]. Repeatable.",
+)
 @click.option("--detect", "auto", is_flag=True, help="Discover the seeds by scanning sources.")
 @click.option("--json", "as_json", is_flag=True, help="Emit the plan as JSON for a pipeline.")
+@click.option(
+    "--explain",
+    "explain_for",
+    default="",
+    metavar="DATASET",
+    help="Why one dataset is in the plan, and why so much of it.",
+)
 @click.pass_context
-def plan(ctx: click.Context, dirties: tuple[str, ...], auto: bool, as_json: bool) -> None:
-    """Show which partitions a set of source changes invalidates."""
+def plan(
+    ctx: click.Context,
+    dirties: tuple[str, ...],
+    auto: bool,
+    as_json: bool,
+    explain_for: str,
+) -> None:
+    """Show which partitions a set of source changes invalidates.
+
+    Prints; never rebuilds. The output is in build order, dependencies first.
+
+    \b
+    Examples:
+      fathom plan --dirty 'raw.events@dt=2026-03-14'
+      fathom plan --dirty 'raw.events@dt=2026-03-14,region=eu'
+      fathom plan --dirty 'raw.events@dt=2026-03-14' --dirty 'raw.fx@dt=2026-03-14'
+      fathom plan --detect                      seed from what the sources report
+      fathom plan --detect --json               for an orchestrator to act on
+      fathom plan --detect --explain gold.monthly
+
+    \b
+    If the plan is bigger than you expected, in order:
+      fathom explain widening
+      fathom plan ... --explain THE_DATASET
+      fathom doctor
+    """
     if not dirties and not auto:
-        raise click.UsageError("pass --dirty, or --detect to scan sources first")
+        raise click.UsageError(
+            "nothing to plan from. Pass --dirty to say what changed, e.g.\n"
+            "  fathom plan --dirty 'raw.events@dt=2026-03-14'\n"
+            "or --detect to ask the configured sources what changed since last time."
+        )
 
     with _project(ctx) as project:
         result = project.plan(detect=True) if auto else project.plan(_seeds(project, dirties))
+        if explain_for:
+            target = project.config.resolve(explain_for)
+            click.echo(result.explain(target))
+            return
         if as_json:
             # The plan is the one output another program acts on, and screen-scraping
             # a summary written for humans is how an orchestrator ends up rebuilding
@@ -267,17 +540,33 @@ def plan(ctx: click.Context, dirties: tuple[str, ...], auto: bool, as_json: bool
             return
         if result.is_empty:
             click.echo("nothing to rebuild")
+            if auto:
+                click.echo(
+                    "No source reported a change since the last `detect`. That is the "
+                    "expected result on a second run — the resume token already moved."
+                )
             return
 
         click.echo(result.summary())
+        click.echo("")
+        click.echo(f"{result.total_partitions} partition(s) across {len(result)} dataset(s).")
         if result.widened:
             click.echo("\nwidened to whole dataset (no provable partition bound):", err=True)
             for ds in sorted(result.widened, key=str):
                 for reason in result.reasons[ds][:2]:
                     click.echo(f"  {ds}: {reason}", err=True)
+            click.echo(
+                "  Run `fathom explain widening` for what this costs and how to fix it.",
+                err=True,
+            )
         if result.cyclic:
             cycles = ", ".join(str(d) for d in sorted(result.cyclic, key=str))
             click.echo(f"\ncycles detected in: {cycles}", err=True)
+            click.echo(
+                "  A dataset that reads itself cannot converge, so the planner took it "
+                "whole rather than looping.",
+                err=True,
+            )
 
 
 # -- profiling -----------------------------------------------------------------
@@ -287,7 +576,18 @@ def plan(ctx: click.Context, dirties: tuple[str, ...], auto: bool, as_json: bool
 @click.argument("dataset", required=False)
 @click.pass_context
 def profile(ctx: click.Context, dataset: str | None) -> None:
-    """Profile datasets from Parquet footers alone. Reads no data pages."""
+    """Profile datasets from Parquet footers alone. Reads no data pages.
+
+    Costs a metadata read rather than a scan, which is what makes profiling
+    affordable enough to run continuously. Establishes the baseline `fathom check`
+    compares against — a first check with no prior profile is not a clean result,
+    it is no result.
+
+    \b
+    Examples:
+      fathom profile                 every path-backed dataset in the config
+      fathom profile gold.monthly    just one
+    """
     with _project(ctx) as project:
         targets = (
             [project.config.resolve(dataset)]
@@ -311,14 +611,29 @@ def profile(ctx: click.Context, dataset: str | None) -> None:
                 rng = f"{col.min}..{col.max}" if col.min is not None else "no stats"
                 click.echo(f"  {col.name:<24} {col.dtype:<12} nulls={rate:<8} {rng}")
         if not shown:
-            raise click.ClickException("no profilable datasets; only path-backed ones qualify")
+            raise click.ClickException(
+                "nothing could be profiled. Only path-backed datasets qualify here — "
+                "Parquet, Delta, or Iceberg under a filesystem or object store. A "
+                "warehouse table is profiled through its engine adapter instead, which "
+                "needs a connection you supply with `register_runner`."
+            )
 
 
 @main.command()
 @click.option("--json", "as_json", is_flag=True, help="Emit findings as JSON for a pipeline.")
 @click.pass_context
 def check(ctx: click.Context, as_json: bool) -> None:
-    """Compare each dataset against its last profile, and attribute any drift."""
+    """Compare each dataset against its last profile, and attribute any drift.
+
+    "revenue moved 8%" is an alert. "revenue moved because fx_rates changed three
+    hops upstream" is a diagnosis, and the second is what the graph adds. Exits 1
+    when any finding is an error.
+
+    \b
+    Examples:
+      fathom check
+      fathom check --json      for a CI gate
+    """
     import json as _json
 
     from ..core.types import ColumnRef
@@ -326,7 +641,11 @@ def check(ctx: click.Context, as_json: bool) -> None:
     with _project(ctx) as project:
         results = project.check()
         if not results:
-            raise click.ClickException("no path-backed datasets to check")
+            raise click.ClickException(
+                "no path-backed datasets to check. `check` compares against stored "
+                "profiles, so run `fathom profile` first — and note that a dataset "
+                "profiled for the first time has nothing to be compared against yet."
+            )
 
         if as_json:
             payload = {
@@ -374,12 +693,25 @@ def check(ctx: click.Context, as_json: bool) -> None:
 @main.command()
 @click.pass_context
 def label(ctx: click.Context) -> None:
-    """Infer column labels, propagate them, and check configured sink policies."""
+    """Infer column labels, propagate them, and check configured sink policies.
+
+    Nobody hand-labels 40,000 columns. Inference proposes; the profile rejects the
+    bad guesses (a `latitude` whose values top out at 4,000 is not a latitude); and
+    labels propagate along graph edges so a derived table inherits what it carries.
+
+    A `*` marks a label somebody confirmed. Exits 1 on a policy violation.
+
+    \b
+    Example:
+      fathom label
+    """
     with _project(ctx) as project:
         labels = project.labels()
         if not labels:
             raise click.ClickException(
-                "no labels inferred; run `fathom profile` on some datasets first"
+                "no labels could be inferred. Inference reads profiles, not schemas, "
+                "so run `fathom profile` on some datasets first — a column name alone "
+                "is deliberately not enough evidence to label one."
             )
 
         for ref, values in sorted(
@@ -426,6 +758,16 @@ def erase(
 
     Always a dry run. Executing needs a live engine binding, which belongs in a
     pipeline rather than a shell command.
+
+    Erasure may under-delete and refuse; it must never over-delete. Exits 1 when the
+    plan is incomplete — a model that retains the subject, or storage that cannot
+    destroy anything, is reported rather than rounded up to success.
+
+    \b
+    Example:
+      fathom erase --subject u1 --key-column user_id --origin raw.events
+      fathom erase --subject u1 --key-column user_id --origin raw.events \\
+          --proof proof.json      # needs FATHOM_SALT
     """
     with _project(ctx) as project:
         graph = project.graph()
@@ -472,11 +814,26 @@ def erase(
 @click.option("--json", "as_json", is_flag=True, help="Emit the totals as JSON for a pipeline.")
 @click.pass_context
 def shadow(ctx: click.Context, as_json: bool) -> None:
-    """Report accumulated shadow results: how much was skipped, and what was missed."""
+    """Report accumulated shadow results: how much was skipped, and what was missed.
+
+    How you decide whether to trust the planner. `missed` must be zero, and this
+    exits non-zero the moment it is not. Accumulate weeks before anything writes —
+    running it costs nothing, because the full rebuild happens either way.
+
+    \b
+    Example:
+      fathom shadow
+      fathom shadow --json     for a CI gate
+    """
     with _project(ctx) as project:
         summary = project.store.shadow_summary()
         if not summary["runs"]:
-            raise click.ClickException("no shadow observations recorded yet")
+            raise click.ClickException(
+                "no shadow observations recorded yet. Shadow mode is fed from your "
+                "pipeline: call `fathom.shadow.run(...)` alongside a full rebuild and "
+                "pass the store, then this reports what accumulated. "
+                "`fathom explain shadow-mode` covers why that order matters."
+            )
 
         if as_json:
             import json as _json
@@ -514,6 +871,13 @@ def completeness(ctx: click.Context, dataset: str, since: str, until: str) -> No
 
     Reads what is present from recorded arrivals rather than from a listing, so it
     still answers after a partition has been deleted.
+
+    The only check that can see a partition which never arrived: it has no profile
+    to drift and no rows to fail an expectation, so nothing else can.
+
+    \b
+    Example:
+      fathom completeness --dataset raw.events --since 2026-03-01 --until 2026-03-31
     """
     with _project(ctx) as project:
         ds = project.config.resolve(dataset)
@@ -550,7 +914,19 @@ def completeness(ctx: click.Context, dataset: str, since: str, until: str) -> No
 @click.option("--retire", is_flag=True, help="Show retirement candidates instead of a ranking.")
 @click.pass_context
 def usage(ctx: click.Context, days: int, retire: bool) -> None:
-    """Report who reads each dataset over a window of recorded reads."""
+    """Report who reads each dataset over a window of recorded reads.
+
+    Nothing here says "unused". Everything says "no reads observed", and carries the
+    window it observed over — query logs have retention limits, and a table read
+    once a quarter looks dead over thirty days. Deleting a table read annually for a
+    filing is the one mistake in this area a rebuild cannot undo.
+
+    \b
+    Examples:
+      fathom usage
+      fathom usage --days 180
+      fathom usage --retire      datasets nothing reads whose descendants nothing reads
+    """
     with _project(ctx) as project:
         window = timedelta(days=days)
         stats = project.store.usage(window=window)
@@ -586,7 +962,16 @@ def value(
     price_per_partition: float,
     price_per_tb: float,
 ) -> None:
-    """Set each dataset's lifetime cost against whether anyone reads it."""
+    """Set each dataset's lifetime cost against whether anyone reads it.
+
+    `--threshold` has no default on purpose: the right number is a fraction of a
+    budget this tool cannot see, and a default would be a made-up one carrying the
+    authority of a real one.
+
+    \b
+    Example:
+      fathom value --threshold 500 --price-per-partition 0.02
+    """
     with _project(ctx) as project:
         model = CostModel(
             price_per_partition=price_per_partition, price_per_tb_scanned=price_per_tb
@@ -613,6 +998,12 @@ def impact(ctx: click.Context, dataset: str, reason: str) -> None:
     """Name every published artefact downstream of a dataset.
 
     The question conventional lineage cannot answer, because it stops at the tables.
+    Exits 1 when a regulatory filing is downstream, because that is a different
+    conversation from a stale dashboard.
+
+    \b
+    Example:
+      fathom impact --dataset gold.monthly --reason "restated fx rates"
     """
     with _project(ctx) as project:
         ds = project.config.resolve(dataset)
@@ -631,7 +1022,14 @@ def risk(ctx: click.Context, min_k: int) -> None:
     """Report columns that identify nobody alone and everybody together.
 
     Proves risk and never proves safety: the bound needs the distinct count of the
-    quasi-identifier *combination*, which is a scan this does not do.
+    quasi-identifier *combination*, which is a scan this does not do. A birth date
+    identifies nobody and a postcode identifies nobody; together they identify most
+    of a population, and per-column labelling is structurally blind to it.
+
+    \b
+    Example:
+      fathom risk
+      fathom risk --min-k 10
     """
     with _project(ctx) as project:
         labels = project.labels(save=False)
@@ -655,7 +1053,15 @@ def risk(ctx: click.Context, min_k: int) -> None:
 @main.command()
 @click.pass_context
 def contracts(ctx: click.Context) -> None:
-    """Verify every contract declared in fathom.yml against what is currently true."""
+    """Verify every contract declared in fathom.yml against what is currently true.
+
+    A failing test says a column vanished. A breached contract says who was promised
+    it and is therefore owed a conversation. Exits 1 on a breach.
+
+    \b
+    Example:
+      fathom contracts
+    """
     with _project(ctx) as project:
         declared = project.config.contracts
         if not declared:
@@ -696,6 +1102,12 @@ def history(ctx: click.Context, limit: int, edge: str, unsafe: bool) -> None:
 
     With `--edge`, answers the question an incident actually asks: six days of
     downstream data stopped being invalidated, so when did that window shrink.
+
+    \b
+    Examples:
+      fathom history
+      fathom history --unsafe                        only narrowings and removals
+      fathom history --edge 'raw.events->silver.events'
     """
     with _project(ctx) as project:
         if edge:
@@ -748,6 +1160,12 @@ def dag(ctx: click.Context, flavor: str, dirties: tuple[str, ...], command: str,
     Nothing here imports Airflow, Dagster, or Prefect: the output is a file you commit
     and read, not a runtime binding. Intervals, retries, and alerting are deliberately
     absent, because guessing at them would be wrong in a way that looks authoritative.
+
+    \b
+    Examples:
+      fathom dag --dirty 'raw.events@dt=2026-03-14'
+      fathom dag --flavor shell --dirty 'raw.events@dt=2026-03-14'
+      fathom dag --flavor dagster --out dags/rebuild.py
     """
     with _project(ctx) as project:
         graph = project.graph()
@@ -787,6 +1205,10 @@ def seasonal(ctx: click.Context, dataset: str, cycle: str, min_observations: int
     Sunday's ceiling, which is to say wide enough to catch nothing. Reports how much
     of the variation the cycle actually explains, so reaching for this over
     `fathom check` stays a decision rather than a default.
+
+    \b
+    Example:
+      fathom seasonal --dataset raw.events --cycle day_of_week
     """
     with _project(ctx) as project:
         ds = project.config.resolve(dataset)

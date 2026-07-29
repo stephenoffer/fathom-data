@@ -1,14 +1,51 @@
 # fathom
 
-**Lineage, partition-scoped invalidation, profiling, and policy propagation for data platforms.**
+**Rebuild only the data that changed, and know everything that change touched.**
+
+Lineage, partition-scoped invalidation, profiling, and policy propagation for data
+platforms — computed from one graph, so they agree with each other.
 
 > Status: beta. All four verbs work end to end against Snowflake, Databricks,
-> BigQuery, DuckDB, Delta, Iceberg, and object storage, with 850+ tests. Nothing
+> BigQuery, DuckDB, Delta, Iceberg, and object storage, with 1,700+ tests. Nothing
 > writes to your data by default.
+
+**New to this?** [**What fathom is**](docs/guide/what-is-fathom.md) explains the
+problem in plain terms and defines the vocabulary.
 
 [Documentation](docs/) · [Getting started](docs/guide/getting-started.md) · [Examples](examples/)
 
 ---
+
+## The problem, in one example
+
+A vendor redelivers one day of March. Four hundred models sit downstream of that
+source table. Which of them are now wrong?
+
+Not *which tables depend on it* — all of them do, transitively. Which **rows**. The
+monthly rollup is wrong for March and fine for the other 35 months. The 7-day
+rolling metric is wrong for one week. The EU partition is affected and the US
+partition is not.
+
+Almost nothing can answer that, so teams rebuild everything on every run, or rebuild
+what somebody remembers and find the stale numbers weeks later.
+
+```bash
+fathom plan --dirty 'raw.events@dt=2026-03-14,region=eu'
+```
+
+```
+duckdb/raw.events       dt=2026-03-14T00:00:00/region=eu
+duckdb/silver.events    dt=2026-03-14T00:00:00/region=eu
+duckdb/gold.monthly     dt=2026-03-01T00:00:00/region=eu
+```
+
+One dirty day and region resolves to one day downstream and one *month* in the
+rollup, still scoped to `region=eu`. Everything else is provably untouched.
+
+That works because every edge in the graph carries the partition arithmetic — a
+dirty day makes exactly the month containing it dirty — rather than the bare fact
+that one table feeds another. Which turns out to answer three more questions that
+are usually three more products.
 
 ## What this is
 
@@ -30,12 +67,12 @@ two. `fathom` computes all three from one metadata plane.
 
 **Four verbs over them:**
 
-| | |
-|---|---|
-| [`plan`](docs/guide/plan.md) | given what changed at the source, rebuild exactly the affected partitions |
-| [`check`](docs/guide/check.md) | detect drift, and attribute the cause upstream |
-| [`label`](docs/guide/label.md) | infer what a column means, propagate policy labels along graph edges |
-| [`erase`](docs/guide/erase.md) | locate a subject's data in every derived table, and destroy it |
+| | The question | What it does |
+|---|---|---|
+| [`plan`](docs/guide/plan.md) | Something changed at the source — what has to be rebuilt? | resolves it to exactly the affected partitions |
+| [`check`](docs/guide/check.md) | A number moved — is that drift, and what caused it? | detects it, and attributes the cause upstream |
+| [`label`](docs/guide/label.md) | What is in this column, and who may use it? | infers the meaning, propagates policy along edges |
+| [`erase`](docs/guide/erase.md) | Someone asked to be deleted — where did their data go? | locates it in every derived table, and destroys it |
 
 ## Why they belong together
 
@@ -53,50 +90,6 @@ Built separately, each of these is worse:
   lakehouse is a rewrite-the-world operation until you know which files in which
   derived tables actually hold their rows.
 
-## Models are datasets
-
-A model is produced from named inputs, in slices that can be rebuilt independently,
-with a version history somebody will need explained, and it can contain a person's
-data. So is a feature view, a vector index, a prompt, an eval set, and an agent run.
-Give them `DatasetId`s and the graph, the planner, the profiler, the policy engine,
-and the eraser already work on them. There is no second graph for ML — which matters,
-because a second graph is a graph that disagrees with the first one.
-
-The four verbs do not change. What they answer does:
-
-| | table | model, index, prompt |
-|---|---|---|
-| `plan` | rebuild the affected partitions | retrain the affected models; **re-embed only the chunks that changed** |
-| `check` | detect drift, attribute it upstream | embedding drift, training/serving skew, **eval sets that leaked into training** |
-| `label` | propagate PII along edges | propagate **licence, consent, and purpose** into training sets and prompts |
-| `erase` | delete the subject's rows | name every **model that retains them**, and what would actually discharge it |
-
-Five questions nobody could previously answer without a person and a week:
-
-- **What was this model trained on?** `fathom.ai.training.data_bill_of_materials`
-  walks the closure and states its own gaps. `training_data_summary` generates the
-  prose an EU AI Act filing asks for, from lineage, so it cannot go stale.
-- **Did the eval leak?** Contamination is a reachability property. If the eval set
-  and the training data share an ancestor, or one is derived from the other, the
-  score measures memorization. `fathom.ai.evals.contamination` checks it in the graph
-  and reports `clean`, `suspect`, or `contaminated` — never rounding up.
-- **What do I actually have to re-embed?** A corpus reindexed nightly pays the full
-  embedding bill whether or not anything changed. `fathom.ai.vectors.reindex_plan`
-  compares content digests and prices the difference. An embedding-model version
-  change short-circuits to a full reindex, because vectors from two spaces are not
-  comparable and a partially reindexed store returns confidently wrong neighbours.
-- **What was in the context window?** `fathom.ai.rag.ContextManifest` records it, and
-  `enforce_context` checks what reached a third-party endpoint against the same sink
-  policy the `label` verb uses. Personal data reaching a model through an interpolated
-  prompt variable is still a transfer.
-- **Which models still hold this person?** `fathom.ai.unlearning.exposures` names
-  them and the route. Deleting rows does not remove a subject from weights, and
-  `completeness_statement` says so in the first sentence rather than emitting
-  `complete: true` over a model that is still serving traffic.
-
-Nothing here claims to remove a subject from a model. It claims to tell you, exactly,
-what you have not yet done. Full walkthrough: [**AI assets**](docs/guide/ai.md).
-
 ## Quickstart
 
 ```bash
@@ -105,20 +98,18 @@ pip install 'fathom-data[cloud]'     # + S3, GCS, Azure
 pip install 'fathom-data[iceberg]'   # + Iceberg (its manifests are Avro)
 ```
 
+Three commands to the plan at the top of this page. `init` writes a starter config,
+`ingest` reads your SQL, dbt manifest, or warehouse history and builds the graph, and
+`plan` walks it:
+
 ```bash
 fathom init          # writes a starter fathom.yml
 fathom ingest        # build the dependency graph
 fathom plan --dirty 'raw.events@dt=2026-03-14,region=eu'
 ```
 
-```
-duckdb/raw.events       dt=2026-03-14T00:00:00/region=eu
-duckdb/silver.events    dt=2026-03-14T00:00:00/region=eu
-duckdb/gold.monthly     dt=2026-03-01T00:00:00/region=eu
-```
-
-One dirty day and region resolves to one day downstream and one *month* in the
-rollup, still scoped to `region=eu`. Everything else is untouched.
+[Getting started](docs/guide/getting-started.md) does that end to end with real
+files. The rest of the command line:
 
 ```bash
 fathom doctor        # what would silently make plans worse
@@ -139,7 +130,10 @@ specs live in one place rather than drifting across invocations.
 
 ## The core invariant
 
-The planner may over-invalidate. It must never under-invalidate.
+The planner may over-invalidate. It must never under-invalidate. Planning a rebuild
+of something that did not need it wastes compute; missing something that did need it
+serves wrong numbers quietly, for weeks. The two errors are not symmetric, and the
+whole design follows from that.
 
 ```
 apply(compose(m1, m2), k)  ⊇  ⋃ { apply(m2, j) for j in apply(m1, k) }
@@ -192,6 +186,50 @@ They **compose** along paths and **join** where paths reconverge, forming a latt
 whose top is "the whole dataset". Grain conversion rounds outward, and windows only
 ever coarsen — a coarse source feeding a finer table widens rather than pretending
 to a precision we do not have.
+
+## Models are datasets
+
+A model is produced from named inputs, in slices that can be rebuilt independently,
+with a version history somebody will need explained, and it can contain a person's
+data. So is a feature view, a vector index, a prompt, an eval set, and an agent run.
+Give them `DatasetId`s and the graph, the planner, the profiler, the policy engine,
+and the eraser already work on them. There is no second graph for ML — which matters,
+because a second graph is a graph that disagrees with the first one.
+
+The four verbs do not change. What they answer does:
+
+| | table | model, index, prompt |
+|---|---|---|
+| `plan` | rebuild the affected partitions | retrain the affected models; **re-embed only the chunks that changed** |
+| `check` | detect drift, attribute it upstream | embedding drift, training/serving skew, **eval sets that leaked into training** |
+| `label` | propagate PII along edges | propagate **licence, consent, and purpose** into training sets and prompts |
+| `erase` | delete the subject's rows | name every **model that retains them**, and what would actually discharge it |
+
+Five questions nobody could previously answer without a person and a week:
+
+- **What was this model trained on?** `fathom.ai.training.data_bill_of_materials`
+  walks the closure and states its own gaps. `training_data_summary` generates the
+  prose an EU AI Act filing asks for, from lineage, so it cannot go stale.
+- **Did the eval leak?** Contamination is a reachability property. If the eval set
+  and the training data share an ancestor, or one is derived from the other, the
+  score measures memorization. `fathom.ai.evals.contamination` checks it in the graph
+  and reports `clean`, `suspect`, or `contaminated` — never rounding up.
+- **What do I actually have to re-embed?** A corpus reindexed nightly pays the full
+  embedding bill whether or not anything changed. `fathom.ai.vectors.reindex_plan`
+  compares content digests and prices the difference. An embedding-model version
+  change short-circuits to a full reindex, because vectors from two spaces are not
+  comparable and a partially reindexed store returns confidently wrong neighbours.
+- **What was in the context window?** `fathom.ai.rag.ContextManifest` records it, and
+  `enforce_context` checks what reached a third-party endpoint against the same sink
+  policy the `label` verb uses. Personal data reaching a model through an interpolated
+  prompt variable is still a transfer.
+- **Which models still hold this person?** `fathom.ai.unlearning.exposures` names
+  them and the route. Deleting rows does not remove a subject from weights, and
+  `completeness_statement` says so in the first sentence rather than emitting
+  `complete: true` over a model that is still serving traffic.
+
+Nothing here claims to remove a subject from a model. It claims to tell you, exactly,
+what you have not yet done. Full walkthrough: [**AI assets**](docs/guide/ai.md).
 
 ## Platforms
 

@@ -126,10 +126,12 @@ def test_an_oversized_range_is_a_clean_error_not_a_traceback(run, store):
         "completeness", "--dataset", "raw.events", "--since", "1000-01-01", "--until", "2026-03-05"
     )
     assert result.exit_code != 0
-    # Either bound may fire first — grains.span's walk limit or the expected-set
-    # ceiling. Both are clean refusals; what matters is that neither is a traceback.
+    # Either bound may fire first — `grains.span`'s walk limit or `expected_keys`'
+    # own ceiling — and either may reword its message. The claim under test is that
+    # an oversized range is refused cleanly rather than raising, so this asserts the
+    # shape of the failure and not the prose, which belongs to those modules.
     assert result.output.startswith("Error:")
-    assert "too large" in result.output or "exceeds max_keys" in result.output
+    assert "Traceback" not in result.output
 
 
 # -- usage ---------------------------------------------------------------------

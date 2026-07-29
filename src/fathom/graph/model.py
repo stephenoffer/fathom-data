@@ -8,13 +8,29 @@ following column edges.
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 
 from ..core.partitions import PartitionMapping, apply
 from ..core.types import UNPARTITIONED, ColumnRef, DatasetId, KeyPredicate, PartitionSpec, subsumes
 
 __all__ = ["Edge", "Graph", "InvalidationPlan", "link"]
+
+
+def _as_dataset(ds: DatasetId | str) -> DatasetId:
+    """Accept an identity or the string form of one.
+
+    Every constructor here takes both, because a graph written out by hand — in a
+    test, a notebook, a bug report — is mostly string literals, and wrapping each
+    one in `DatasetId(...)` triples its width for no added clarity.
+    """
+    return ds if isinstance(ds, DatasetId) else DatasetId.parse(ds)
+
+
+def _as_spec(spec: PartitionSpec | str) -> PartitionSpec:
+    """Accept a spec or its compact string form (``"dt:day, region"``)."""
+    return spec if isinstance(spec, PartitionSpec) else PartitionSpec.parse(spec)
+
 
 # How many times a dataset *on a cycle* may have its dirty set enlarged before we
 # give up and mark it whole. Self-referencing incremental models create cycles whose
@@ -49,7 +65,30 @@ def _absorb(
 
 @dataclass(frozen=True)
 class Edge:
-    """A proven dependency from one dataset to another."""
+    """A proven dependency from one dataset to another.
+
+    Three things travel on an edge, and each answers a different question:
+
+    - **mapping** — which output partitions one dirty input partition dirties. This
+      is what makes a plan narrower than "everything downstream".
+    - **columns** — which source column feeds which target column. Empty means we
+      know the datasets are related but not which columns, so drift attributes to
+      the table rather than to a column.
+    - **evidence** — how we learned this edge, carried so a surprising plan can be
+      traced back to the thing that claimed the dependency.
+
+    Example:
+        >>> from fathom.core.partitions import PartitionMapping, TimeWindow
+        >>> edge = Edge(
+        ...     DatasetId("duckdb", "raw.events"),
+        ...     DatasetId("duckdb", "silver.events"),
+        ...     PartitionMapping.of(dt=TimeWindow.identity("dt", "day")),
+        ...     columns=(("amount", "amount"),),
+        ...     evidence="sql",
+        ... )
+        >>> print(edge)
+        duckdb/raw.events -> duckdb/silver.events {dt: dt@day} [sql]
+    """
 
     src: DatasetId
     dst: DatasetId
@@ -60,10 +99,42 @@ class Edge:
     def __str__(self) -> str:
         return f"{self.src} -> {self.dst} {self.mapping} [{self.evidence}]"
 
+    def explain(self) -> str:
+        """This edge in sentences — what it claims, and where the claim came from.
+
+        What `fathom lineage --explain` prints. The mapping is the part nobody can
+        verify by reading the SQL, so it is the part worth spelling out.
+        """
+        lines = [f"{self.src} feeds {self.dst}, learned from {self.evidence}."]
+        if self.columns:
+            pairs = ", ".join(f"{s} -> {t}" for s, t in self.columns)
+            lines.append(f"Columns: {pairs}")
+        else:
+            lines.append(
+                "Columns: not known, so drift here attributes to the dataset "
+                "rather than to a column."
+            )
+        lines.append("Partitions:")
+        lines.extend(f"  {line}" for line in self.mapping.explain().splitlines())
+        return "\n".join(lines)
+
 
 @dataclass
 class InvalidationPlan:
-    """What must be rebuilt, in what order, and why."""
+    """What must be rebuilt, in what order, and why.
+
+    What `Graph.invalidate` returns and `fathom plan` prints. Iterating a plan walks
+    its datasets in build order, so the common use reads as a loop:
+
+        for dataset in plan:
+            for key in plan.partitions(dataset):
+                rebuild(dataset, key)
+
+    Four fields carry the answer, and two carry the caveats. `widened` names the
+    datasets the planner could not scope precisely, and `cyclic` the ones it had to
+    stop iterating on. A plan much larger than expected is almost always explained
+    by one of those two sets — start there, then read `why(dataset)`.
+    """
 
     dirty: dict[DatasetId, frozenset[KeyPredicate]] = field(default_factory=dict)
     order: list[DatasetId] = field(default_factory=list)
@@ -76,9 +147,70 @@ class InvalidationPlan:
         """True when nothing needs rebuilding."""
         return not self.dirty
 
+    def __bool__(self) -> bool:
+        """A plan is truthy when it has work in it, so `if plan:` reads correctly."""
+        return not self.is_empty
+
+    def __len__(self) -> int:
+        """How many datasets are affected."""
+        return len(self.dirty)
+
+    def __iter__(self) -> Iterator[DatasetId]:
+        """Affected datasets in build order — dependencies before dependents."""
+        return iter(self.order)
+
+    def __contains__(self, ds: object) -> bool:
+        """True when this dataset is in the plan."""
+        return ds in self.dirty
+
     def partitions(self, ds: DatasetId) -> frozenset[KeyPredicate]:
         """Dirty partitions for one dataset, empty when it is unaffected."""
         return self.dirty.get(ds, frozenset())
+
+    @property
+    def total_partitions(self) -> int:
+        """Every dirty partition across every dataset — the size of the rebuild.
+
+        Counts predicates, and a widened dataset contributes one predicate covering
+        all of it. Compare against `graph.plan.cost` for what that actually costs.
+        """
+        return sum(len(keys) for keys in self.dirty.values())
+
+    def why(self, ds: DatasetId) -> list[str]:
+        """Why this dataset is in the plan, most recent reason last.
+
+        The first entry is either the seed or the edge that first reached it; a
+        `widened:` entry means precision was lost here and everything downstream
+        inherited it.
+        """
+        return list(self.reasons.get(ds, ()))
+
+    def explain(self, ds: DatasetId) -> str:
+        """One dataset's place in the plan, in full: partitions, caveats, and cause.
+
+        The answer to "why is this being rebuilt, and why so much of it?" — which is
+        the question every plan larger than expected raises.
+        """
+        if ds not in self.dirty:
+            return f"{ds} is not in this plan; nothing that reaches it changed"
+        keys = sorted(str(k) for k in self.dirty[ds])
+        lines = [f"{ds}: {len(keys)} partition(s) to rebuild"]
+        lines.extend(f"  {k}" for k in keys[:10])
+        if len(keys) > 10:
+            lines.append(f"  … and {len(keys) - 10} more")
+        if ds in self.widened:
+            lines.append(
+                "  ! widened to the whole dataset — a mapping on the way here could "
+                "not be proven, so precision was lost"
+            )
+        if ds in self.cyclic:
+            lines.append(
+                "  ! on a cycle — the planner stopped enlarging and took the whole "
+                "dataset rather than looping"
+            )
+        lines.append("  because:")
+        lines.extend(f"    {reason}" for reason in self.why(ds))
+        return "\n".join(lines)
 
     def summary(self) -> str:
         """The plan as text: datasets in build order, with their dirty partitions."""
@@ -94,7 +226,37 @@ class InvalidationPlan:
 
 
 class Graph:
-    """Datasets, their partition specs, and the proven edges between them."""
+    """Datasets, their partition specs, and the proven edges between them.
+
+    Build one by hand for a test or a notebook; in a project it is built for you by
+    `fathom ingest` and read back from the store. The constructors take strings
+    wherever an identity or a spec is expected, so a graph reads as what it is:
+
+    Example:
+        >>> g = Graph()
+        >>> g.add_dataset("duckdb/raw.events", "dt:day")
+        >>> g.add_dataset("duckdb/gold.monthly", "dt:month")
+        >>> _ = g.connect("duckdb/raw.events", "duckdb/gold.monthly", evidence="sql")
+        >>> len(g), "duckdb/raw.events" in g
+        (2, True)
+
+    With no mapping given, `connect` uses the honest default: unbounded, meaning any
+    change rebuilds the whole target. That is deliberately not inferred from the two
+    specs — a daily source and a monthly target *usually* means a rollup, and a plan
+    built on "usually" is a plan that occasionally serves stale data. State it:
+
+        >>> from fathom.core.partitions import PartitionMapping
+        >>> g = Graph()
+        >>> daily, monthly = PartitionSpec.parse("dt:day"), PartitionSpec.parse("dt:month")
+        >>> edge = g.connect("duckdb/raw.events", "duckdb/gold.monthly", evidence="sql",
+        ...                  src_spec=daily, dst_spec=monthly,
+        ...                  mapping=PartitionMapping.rollup(daily, monthly))
+        >>> print(edge.mapping)
+        {dt: dt@day->month}
+
+    Traversal does not live here — see `fathom.query` for ancestors, descendants,
+    paths, cycles, and subgraphs. This class holds the graph and plans over it.
+    """
 
     def __init__(self) -> None:
         self._specs: dict[DatasetId, PartitionSpec] = {}
@@ -104,25 +266,107 @@ class Graph:
 
     # -- construction ----------------------------------------------------------
 
-    def add_dataset(self, ds: DatasetId, spec: PartitionSpec = UNPARTITIONED) -> None:
+    def add_dataset(self, ds: DatasetId | str, spec: PartitionSpec | str = UNPARTITIONED) -> None:
         """Register a dataset and its partition spec.
 
         Raises when a real spec would be replaced by a different real one: two
         sources disagreeing about partitioning silently corrupts every mapping
         composed across this dataset.
+
+        Args:
+            ds: The dataset, or a string `DatasetId.parse` accepts.
+            spec: How it is partitioned, or a string `PartitionSpec.parse` accepts
+                (``"dt:day, region"``). Omit for an unpartitioned dataset — which
+                the planner can only ever invalidate whole.
+
+        Raises:
+            ValueError: A different non-empty spec is already registered.
+
+        Example:
+            >>> g = Graph()
+            >>> g.add_dataset("duckdb/raw.events", "dt:day, region")
+            >>> g.spec(DatasetId("duckdb", "raw.events")).names
+            ('dt', 'region')
         """
-        existing = self._specs.get(ds)
-        if existing is not None and existing != spec and len(existing) > 0:
-            raise ValueError(f"conflicting partition specs for {ds}: {existing} vs {spec}")
-        self._specs[ds] = spec
+        dataset = _as_dataset(ds)
+        wanted = _as_spec(spec)
+        existing = self._specs.get(dataset)
+        if existing is not None and existing != wanted and len(existing) > 0:
+            raise ValueError(
+                f"conflicting partition specs for {dataset}: already registered as "
+                f"`{existing}`, now given `{wanted}`. Two sources disagreeing about "
+                f"partitioning corrupts every mapping composed across this dataset, so "
+                f"this is refused rather than resolved. Fix the declaration in "
+                f"fathom.yml, or alias the two identities if they are different datasets"
+            )
+        self._specs[dataset] = wanted
 
     def add_edge(self, edge: Edge) -> None:
-        """Add a proven dependency. Parallel edges from different evidence are kept."""
+        """Add a proven dependency. Parallel edges from different evidence are kept.
+
+        Both endpoints are registered if new, unpartitioned. Prefer `connect` unless
+        you already hold an `Edge`.
+        """
         self._specs.setdefault(edge.src, UNPARTITIONED)
         self._specs.setdefault(edge.dst, UNPARTITIONED)
         self._out[edge.src].append(edge)
         self._in[edge.dst].append(edge)
         self._cyclic_cache = None
+
+    def connect(
+        self,
+        src: DatasetId | str,
+        dst: DatasetId | str,
+        *,
+        evidence: str = "declared",
+        mapping: PartitionMapping | None = None,
+        columns: Iterable[tuple[str, str]] = (),
+        src_spec: PartitionSpec | str | None = None,
+        dst_spec: PartitionSpec | str | None = None,
+    ) -> Edge:
+        """Register both endpoints and the edge between them, and return the edge.
+
+        The one-call way to build a graph. Identities and specs may be strings.
+
+        Args:
+            src: The dataset that feeds.
+            dst: The dataset that is fed.
+            evidence: How this dependency was learned — ``sql``, ``dbt``,
+                ``openlineage``, ``declared``. Carried so a surprising plan can be
+                traced back to whatever claimed the dependency.
+            mapping: Which output partitions one dirty input partition dirties.
+                Defaults to unbounded — the honest answer when nothing proved a
+                relationship, which costs a full rebuild of the target and never
+                serves stale data. Pass `PartitionMapping.identity`,
+                `.rollup`, or one built from `TimeWindow` to narrow it.
+            columns: ``(source column, target column)`` pairs. Without them drift
+                attributes to the dataset rather than to a column.
+            src_spec: Partition spec for `src`, if not already registered.
+            dst_spec: Partition spec for `dst`, if not already registered.
+
+        Returns:
+            The edge that was added.
+
+        Example:
+            >>> from fathom.core.partitions import PartitionMapping
+            >>> g = Graph()
+            >>> edge = g.connect("duckdb/a", "duckdb/b", evidence="sql",
+            ...                  src_spec="dt:day", dst_spec="dt:day",
+            ...                  mapping=PartitionMapping.identity(PartitionSpec.parse("dt:day")),
+            ...                  columns=[("amount", "amount")])
+            >>> print(edge.mapping)
+            {dt: dt@day}
+        """
+        return link(
+            self,
+            _as_dataset(src),
+            _as_dataset(dst),
+            evidence=evidence,
+            mapping=mapping,
+            columns=columns,
+            src_spec=None if src_spec is None else _as_spec(src_spec),
+            dst_spec=None if dst_spec is None else _as_spec(dst_spec),
+        )
 
     def spec(self, ds: DatasetId) -> PartitionSpec:
         """How this dataset is partitioned, or `UNPARTITIONED` when unknown."""
@@ -145,6 +389,60 @@ class Graph:
     def in_edges(self, ds: DatasetId) -> list[Edge]:
         """Edges entering this dataset — what it is built from."""
         return list(self._in.get(ds, ()))
+
+    # -- orientation -----------------------------------------------------------
+
+    def __len__(self) -> int:
+        """How many datasets the graph holds."""
+        return len(self._specs)
+
+    def __contains__(self, ds: object) -> bool:
+        """True when this dataset is in the graph. Accepts a string."""
+        if isinstance(ds, str):
+            try:
+                ds = DatasetId.parse(ds)
+            except ValueError:
+                return False
+        return ds in self._specs
+
+    def __iter__(self) -> Iterator[DatasetId]:
+        """Every dataset, sorted — so `for ds in graph` is stable across runs."""
+        return iter(self.datasets)
+
+    def __repr__(self) -> str:
+        return f"<Graph {len(self._specs)} datasets, {len(self.edges)} edges>"
+
+    def describe(self) -> str:
+        """A few lines orienting a reader in an unfamiliar graph.
+
+        Size, how much of it is precise enough to plan on, and the datasets nothing
+        feeds. The counts here are the ones that predict how good a plan will be: an
+        unbounded edge contributes nothing to narrowing a rebuild, and a dataset
+        without a spec can only ever be invalidated whole.
+
+        For the full picture see `fathom.metrics.coverage`, which this summarises.
+        """
+        edges = self.edges
+        unbounded = sum(1 for e in edges if e.mapping.is_unbounded)
+        specced = sum(1 for spec in self._specs.values() if spec.fields)
+        sourced = {e.dst for e in edges}
+        roots = [ds for ds in self.datasets if ds not in sourced]
+        lines = [
+            f"{len(self._specs)} datasets, {len(edges)} edges",
+            f"{specced}/{len(self._specs)} datasets have a partition spec"
+            " (the rest can only be rebuilt whole)",
+        ]
+        if edges:
+            lines.append(
+                f"{len(edges) - unbounded}/{len(edges)} edges carry a provable mapping"
+                f" ({unbounded} unbounded, contributing nothing to a plan)"
+            )
+        lines.append(
+            f"{len(roots)} source dataset(s) nothing else feeds: "
+            + (", ".join(str(r) for r in roots[:5]) or "none")
+            + (f", +{len(roots) - 5} more" if len(roots) > 5 else "")
+        )
+        return "\n".join(lines)
 
     def _on_cycle(self) -> frozenset[DatasetId]:
         """Datasets that can reach themselves — the only ones the planner can loop on.
@@ -219,8 +517,41 @@ class Graph:
     ) -> InvalidationPlan:
         """Propagate dirty partitions downstream to a fixpoint.
 
+        The `plan` verb. Give it what changed at the source; it returns every
+        partition of every downstream dataset that went stale, in build order.
+
         Over-approximates by construction: unprovable relationships widen to the whole
         dataset, and a dataset revisited too many times (a cycle) widens as well.
+
+        Args:
+            seeds: What changed, per dataset. A dataset absent from `seeds` is
+                treated as unchanged — this is not a filter, it is the input.
+            max_revisits: How many times a dataset *on a cycle* may be enlarged
+                before it is widened to whole. Does not apply to acyclic datasets,
+                which converge on their own.
+
+        Returns:
+            The plan. `is_empty` when nothing downstream is affected.
+
+        Example:
+            >>> from datetime import datetime
+            >>> from fathom.core.partitions import PartitionMapping
+            >>> daily, monthly = PartitionSpec.parse("dt:day"), PartitionSpec.parse("dt:month")
+            >>> g = Graph()
+            >>> _ = g.connect("duckdb/raw.events", "duckdb/gold.monthly", evidence="sql",
+            ...               src_spec=daily, dst_spec=monthly,
+            ...               mapping=PartitionMapping.rollup(daily, monthly))
+            >>> plan = g.invalidate({
+            ...     DatasetId("duckdb", "raw.events"): [KeyPredicate.of(dt=datetime(2026, 3, 14))]
+            ... })
+            >>> print(plan.summary())
+            duckdb/raw.events
+                dt=2026-03-14T00:00:00
+            duckdb/gold.monthly
+                dt=2026-03-01T00:00:00
+
+        One dirty day, one dirty month. Note that the seeded dataset is in the plan
+        too — it changed, so whatever reads it downstream is stale, and so is it.
         """
         plan = InvalidationPlan()
         queue: deque[DatasetId] = deque()
@@ -319,6 +650,20 @@ class Graph:
 
         This is what turns a drift alert into a diagnosis: the profiler says a column
         moved, and these are the upstream columns that could have moved it.
+
+        A path may contain ``*`` as a column name, meaning the edge is dataset-level:
+        that dataset contributes, but which column is not known. Adapters without
+        column lineage produce those, and they are still worth reporting — a
+        candidate you can rule out beats no candidate at all.
+
+        Args:
+            target: The column that moved.
+            max_depth: How many hops upstream to walk. Six covers a typical
+                warehouse chain; raise it for deeper ones, at a cost in paths.
+
+        Returns:
+            Paths from `target` back towards its sources, nearest first. Each path
+            starts at `target` itself.
         """
         paths: list[list[ColumnRef]] = []
         frontier: list[list[ColumnRef]] = [[target]]

@@ -317,3 +317,82 @@ def test_covered_by_needs_every_field_to_agree():
     wrong_region = KeyPredicate.of(dt=ANY, region="us")
 
     assert not covered_by([wrong_region], concrete)
+
+
+# -- named constructors and explanations ---------------------------------------
+#
+# A mapping is the one thing in the graph nobody can check by reading the code that
+# produced it. These cover the two things that make that reviewable: constructors
+# named for the shape they build, and a sentence saying what the mapping claims.
+
+
+def test_identity_is_the_same_bucket_on_both_sides():
+    assert TimeWindow.identity("dt", "day") == TimeWindow("dt", 0, 0, Grain.DAY, Grain.DAY)
+
+
+def test_rollup_states_the_grain_change_and_nothing_else():
+    assert TimeWindow.rollup("dt", "day", "month") == TimeWindow("dt", 0, 0, Grain.DAY, Grain.MONTH)
+
+
+def test_trailing_takes_a_length_rather_than_offsets():
+    """`length=7` cannot be off by one the way `(0, 6)` written by hand can."""
+    assert TimeWindow.trailing("dt", 7, "day") == TimeWindow("dt", 0, 6, Grain.DAY, Grain.DAY)
+
+
+def test_a_trailing_window_must_cover_at_least_one_bucket():
+    with pytest.raises(ValueError, match="at least one bucket"):
+        TimeWindow.trailing("dt", 0, "day")
+
+
+def test_the_constructors_accept_grain_names():
+    assert TimeWindow.identity("dt", "daily") == TimeWindow.identity("dt", Grain.DAY)
+
+
+def test_a_backwards_window_suggests_the_constructor_that_gets_it_right():
+    with pytest.raises(ValueError) as exc:
+        TimeWindow("dt", 6, 0, Grain.DAY, Grain.DAY)
+    assert "TimeWindow.trailing('dt', 7, Grain.DAY)" in str(exc.value)
+
+
+def test_a_refining_window_explains_why_it_is_refused():
+    with pytest.raises(ValueError) as exc:
+        TimeWindow("dt", 0, 0, Grain.MONTH, Grain.DAY)
+    message = str(exc.value)
+    assert "UNBOUNDED" in message
+    assert "serves stale data" in message
+
+
+@pytest.mark.parametrize(
+    ("mapping", "expected"),
+    [
+        (TimeWindow.identity("dt", "day"), "the same day"),
+        (TimeWindow.rollup("dt", "day", "month"), "the month containing it"),
+        (TimeWindow.trailing("dt", 7, "day"), "the 6 days after it"),
+        (TimeWindow("dt", -3, 0, Grain.DAY, Grain.DAY), "the 3 days before it"),
+        (Passthrough("region"), "that same region"),
+        (UNBOUNDED, "no relationship was provable"),
+    ],
+)
+def test_every_field_mapping_can_say_what_it_claims(mapping, expected: str):
+    assert expected in mapping.explain()
+
+
+def test_a_whole_mapping_explains_one_field_per_line():
+    mapping = PartitionMapping.of(
+        dt=TimeWindow.rollup("dt", "day", "month"),
+        region=Passthrough("region"),
+    )
+    lines = mapping.explain().splitlines()
+    assert len(lines) == 2
+    assert lines[0].startswith("dt: ")
+    assert lines[1].startswith("region: ")
+
+
+def test_an_empty_mapping_says_what_it_will_cost():
+    assert "whole output" in PartitionMapping().explain()
+
+
+def test_reprs_are_the_expression_that_rebuilds_them():
+    assert repr(Passthrough("region")) == "Passthrough('region')"
+    assert repr(UNBOUNDED) == "UNBOUNDED"
+    assert repr(TimeWindow.identity("dt", "day")) == "TimeWindow('dt', 0, 0, day, day)"
