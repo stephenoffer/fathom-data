@@ -20,9 +20,21 @@ where every input may. Getting that backwards fails open, which is why it is a
 package boundary and not a convention.
 """
 
-from . import consent, contracts, erasure, licenses, policy, reidentification, replicas
+from . import (
+    access,
+    approvals,
+    consent,
+    contracts,
+    erasure,
+    licenses,
+    policy,
+    reidentification,
+    replicas,
+)
 
 __all__ = [
+    "access",
+    "approvals",
     "consent",
     "contracts",
     "erasure",

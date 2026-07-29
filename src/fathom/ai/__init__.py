@@ -15,6 +15,9 @@ matters because a second graph is a graph that disagrees with the first one.
     agents       what an autonomous program actually read, wrote, and could leak
     attribution  turning a drift alert into a ranked diagnosis
     unlearning   erasure that reaches the model, and honesty about where it stops
+    train/       the run, the checkpoint, and everything downstream of a base model
+    quality/     contamination between a training corpus and an eval set
+    serve/       endpoints, traffic splits, and the rollback that has to work
 
 This package sits above `govern` and below nothing. A new asset kind is a member of
 `AssetKind`, a constructor and a spec in `assets`, and a module here — no changes
@@ -28,7 +31,10 @@ from . import (
     evals,
     features,
     prompts,
+    quality,
     rag,
+    serve,
+    train,
     training,
     unlearning,
     vectors,
@@ -61,6 +67,9 @@ __all__ = [
     "agent",
     "agents",
     "assets",
+    "quality",
+    "serve",
+    "train",
     "attribution",
     "checkpoint",
     "corpus",

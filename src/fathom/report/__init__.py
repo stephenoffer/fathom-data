@@ -3,6 +3,8 @@
     render         Mermaid, Graphviz, D2, PlantUML, Cytoscape, JSON, Markdown
     emit           OpenLineage, DataHub, Atlas, OpenMetadata payloads
     orchestrators  a plan as an Airflow, Dagster, or Prefect DAG file
+    notify         a finding routed to a person, deduplicated and quieted
+    telemetry      fathom's own metrics and traces, in Prometheus and OTLP form
     compliance     records of processing, subject access, model training summaries
 
 Every function here is pure: artifacts in, a string or a dict out. No clients, no
@@ -19,6 +21,13 @@ Neither imports the thing it targets. A library that pulls in Airflow to be impo
 is a library people vendor around.
 """
 
-from . import compliance, emit, orchestrators, render
+from . import compliance, emit, notify, orchestrators, render, telemetry
 
-__all__ = ["compliance", "emit", "orchestrators", "render"]
+__all__ = [
+    "compliance",
+    "emit",
+    "notify",
+    "orchestrators",
+    "render",
+    "telemetry",
+]

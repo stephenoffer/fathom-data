@@ -8,11 +8,17 @@ a vector index are datasets, so the graph already works on them. The gaps are pl
 where an asset exists that has no `DatasetId`, or a question exists that the graph
 could answer and no code asks.
 
+Entries marked **Closed** name the module that answers them. The remaining nine —
+tokenizers, multimodal assets, data mixtures, safety suites, a REST API, catalog
+write-back, orchestrator submission, ticketing, and scale — are still open.
+
 ---
 
 ## Research and frontier AI
 
 ### 1. Training runs are invisible
+
+**Closed** — `ai/train/experiments.py`.
 
 `ai/training.py` records what a model was trained *on*. It does not record the run:
 hyperparameters, the sweep it belonged to, the ablation it was compared against, or
@@ -25,6 +31,8 @@ comparison; scaling-law fitting and extrapolation; seed and determinism tracking
 
 ### 2. Checkpoints have no topology
 
+**Closed** — `ai/train/checkpoints.py`.
+
 A checkpoint is currently one asset. In practice it is sharded across ranks, written
 by a specific parallelism configuration, and resumable only by a job with matching
 topology. Resuming a 512-GPU run into a 256-GPU cluster is a real operation with a
@@ -35,6 +43,8 @@ resume compatibility checks, checkpoint retention policy, and rollback.
 
 ### 3. Fine-tuning lineage is flat
 
+**Closed** — `ai/train/finetuning.py`.
+
 A LoRA adapter derives from a base model. A merged model derives from both. A
 distilled student derives from a teacher. A DPO run derives from a preference set
 that derives from annotator output. None of those relationships are expressible, so
@@ -44,6 +54,8 @@ that derives from annotator output. None of those relationships are expressible,
 lineage, annotator provenance, and the licence propagation that follows from them.
 
 ### 4. Contamination checking does not scale
+
+**Closed** — `ai/quality/contamination.py`.
 
 `ai/evals.py` checks contamination as graph reachability, which is correct and
 cheap. It cannot catch the case where the eval text was copied into a corpus with no
@@ -69,6 +81,8 @@ drift, and personal data in them. The profiler assumes Parquet columns.
 resolution drift, and per-modality quality checks.
 
 ### 7. Serving is not in the graph
+
+**Closed** — `ai/serve/deployments.py`.
 
 The graph ends at the model. Deployments, routing policies, quantized variants, and
 KV-cache reuse are all downstream transformations that change what users see, and
@@ -100,6 +114,8 @@ lifecycle that ends in a test rather than a ticket.
 
 ### 10. There is no access control
 
+**Closed** — `govern/access/rbac.py`.
+
 Anyone who can run the CLI can read every profile, every label, and every erasure
 proof — including the subject digests. In a regulated environment that is
 disqualifying on its own.
@@ -109,6 +125,8 @@ a deny-by-default posture on governance artefacts.
 
 ### 11. Nothing is audited
 
+**Closed** — `govern/access/audit.py`.
+
 Who ran the erasure? Who confirmed the label that let PII into the training set? The
 store records outcomes, not actors.
 
@@ -117,12 +135,16 @@ tamper-evidence that a regulator can verify.
 
 ### 12. One store, one tenant
 
+**Closed** — `govern/access/tenancy.py`.
+
 A platform team running fathom for twenty product teams has no isolation boundary.
 
 **Closes it:** tenant scoping through the store, per-tenant policy, and
 cross-tenant reference detection.
 
 ### 13. Changes need no approval
+
+**Closed** — `govern/approvals.py`.
 
 Editing a partition spec silently changes what every future rebuild covers. There is
 no gate, no reviewer, and no record.
@@ -132,6 +154,8 @@ that a spec change affecting a contracted dataset cannot merge unreviewed.
 
 ### 14. Incidents are not modelled
 
+**Closed** — `observe/incidents.py`.
+
 A drift finding is a line of output. It is not an incident with an owner, a
 timeline, a blast radius, or a postmortem.
 
@@ -140,6 +164,8 @@ notification routing, and a postmortem template populated from lineage.
 
 ### 15. Nothing reaches a human
 
+**Closed** — `report/notify.py`.
+
 Every check exits non-zero and that is all. No Slack, no PagerDuty, no email, no
 webhook.
 
@@ -147,6 +173,8 @@ webhook.
 and quiet hours.
 
 ### 16. Keys are assumed, not managed
+
+**Closed** — `govern/access/keys.py`.
 
 Crypto-shredding is named as the answer for versioned storage, but there is no key
 registry, no rotation, and no way to prove a key was destroyed.
@@ -164,6 +192,8 @@ pagination, filtering, and a stable envelope — transport-agnostic so it can be
 served by anything.
 
 ### 18. Operations cannot see it
+
+**Closed** — `report/telemetry.py`.
 
 No metrics, no traces, no health endpoint. Running this as a service means running it
 blind.
@@ -195,6 +225,8 @@ A contract breach should open a ticket assigned to the producing team.
 lifecycle sync.
 
 ### 22. The store cannot be upgraded
+
+**Closed** — `store/migrations.py`.
 
 Schema version 1 is checked and refused if newer. There is no migration path, no
 backup, and no export.

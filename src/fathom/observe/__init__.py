@@ -9,6 +9,7 @@
     regression    did the rewrite change the numbers, and by how much
     usage         who reads a dataset, and what follows from nobody reading it
     shadow        the planner graded against a full rebuild, publishing its own misses
+    incidents     findings grouped into one owned incident, and the postmortem after
     freshness     transitive age — a table is only as fresh as its oldest input
 
 All are cheap by construction. A profile reads Parquet footers rather than data
@@ -25,6 +26,7 @@ expectation.
 from . import (
     completeness,
     freshness,
+    incidents,
     joins,
     profile,
     quality,
@@ -38,6 +40,7 @@ from . import (
 __all__ = [
     "completeness",
     "freshness",
+    "incidents",
     "joins",
     "profile",
     "quality",
